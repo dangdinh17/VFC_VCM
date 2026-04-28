@@ -37,3 +37,26 @@ This will run the trainer for 2 iterations on random data and print loss, distor
 Project structure
 -----------------
 See top-level structure in the repository root. Key modules live under `src/`.
+
+
+
+Cài cuda12.6
+conda activate vfc
+mkdir -p $CONDA_PREFIX/etc/conda/activate.d
+mkdir -p $CONDA_PREFIX/etc/conda/deactivate.d
+nano $CONDA_PREFIX/etc/conda/activate.d/cuda.sh
+
+export CUDA_HOME=/work/u9564043/cuda-12.6
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+
+nano $CONDA_PREFIX/etc/conda/deactivate.d/cuda.sh
+unset CUDA_HOME
+
+sudo apt-get install cmake g++
+cd src
+mkdir build
+cd build
+conda activate $YOUR_PY36_ENV_NAME
+cmake ../cpp -DCMAKE_BUILD_TYPE=Release
+make -j

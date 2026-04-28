@@ -45,3 +45,5 @@ logs/
 outputs/
 data/
 # Note: `compressai/` is expected to be present in the workspace (cloned externally). Do NOT ignore it here.
+
+*.so

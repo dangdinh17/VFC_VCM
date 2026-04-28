@@ -38,9 +38,11 @@ data:
   pad_if_needed: true
   max_train_samples: null
   max_valid_samples: 1000
+  seq_len: 8
 
 training:
   epochs: 30
+  resume_from: null
   train_batch_size: 8
   valid_batch_size: 1
   lr: 1.0e-4
