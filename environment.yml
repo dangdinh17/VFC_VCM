@@ -1,0 +1,11 @@
+name: vfc
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.10
+  - ipykernel
+  - tqdm
+prefix: /home/u9564043/anaconda3/envs/vfc
+
