@@ -43,11 +43,11 @@ data:
 training:
   epochs: 30
   resume_from: null
-  train_batch_size: 8
+  train_batch_size: 4
   valid_batch_size: 1
   lr: 1.0e-4
   weight_decay: 1.0e-4
-  num_workers: 4
+  num_workers: 8
   device: auto
   print_freq: 20
   stages:
