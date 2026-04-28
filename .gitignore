@@ -1,0 +1,47 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+envs/
+.env
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# PyTorch artifacts / checkpoints
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor directories and files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Caches
+.cache/
+.pytest_cache/
+
+# Ignore local secrets
+*.env
+
+outputs/
+data/
+# Note: `compressai/` is expected to be present in the workspace (cloned externally). Do NOT ignore it here.

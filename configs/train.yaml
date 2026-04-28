@@ -1,0 +1,4 @@
+lambda: 0.01
+lr: 1e-4
+iterations: 2
+batch_size: 1
