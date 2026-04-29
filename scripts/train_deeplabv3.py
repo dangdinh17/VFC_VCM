@@ -13,96 +13,19 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from torch import nn
+from torch import device, nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from torchvision.models import ResNet50_Weights
 from torchvision.models.segmentation import deeplabv3_resnet50
-
+from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.utils.config import load_config
-
-
-@dataclass
-class VOSItem:
-	image_path: Path
-	mask_path: Path
-
-
-class VOS2019BinarySegmentationDataset(Dataset):
-	"""DAVIS/VOS2019 dataset for binary segmentation (bg vs fg)."""
-
-	def __init__(
-		self,
-		split_dir: Path,
-		image_size: Tuple[int, int] = (480, 854),
-		max_samples: int | None = None,
-		seed: int = 42,
-	) -> None:
-		super().__init__()
-		self.split_dir = split_dir
-		self.img_root = split_dir / "JPEGImages"
-		self.mask_root = split_dir / "Annotations"
-
-		if not self.img_root.exists() or not self.mask_root.exists():
-			raise FileNotFoundError(
-				f"Missing JPEGImages/Annotations under {split_dir}. "
-				"Expected VOS2019 folder structure."
-			)
-
-		self.items = self._collect_items(max_samples=max_samples, seed=seed)
-		if len(self.items) == 0:
-			raise RuntimeError(f"No image/mask pairs found under {split_dir}")
-
-		h, w = int(image_size[0]), int(image_size[1])
-		self.image_tf = transforms.Compose(
-			[
-				transforms.Resize((h, w), interpolation=transforms.InterpolationMode.BILINEAR),
-				transforms.ToTensor(),
-				transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-			]
-		)
-		self.mask_resize = transforms.Resize(
-			(h, w), interpolation=transforms.InterpolationMode.NEAREST
-		)
-
-	def _collect_items(self, max_samples: int | None, seed: int) -> List[VOSItem]:
-		pairs: List[VOSItem] = []
-		for video_dir in sorted(self.mask_root.iterdir()):
-			if not video_dir.is_dir():
-				continue
-			for mask_path in sorted(video_dir.glob("*.png")):
-				stem = mask_path.stem
-				img_path = self.img_root / video_dir.name / f"{stem}.jpg"
-				if img_path.exists():
-					pairs.append(VOSItem(image_path=img_path, mask_path=mask_path))
-
-		if max_samples is not None and max_samples < len(pairs):
-			rng = random.Random(seed)
-			rng.shuffle(pairs)
-			pairs = pairs[: max(1, max_samples)]
-
-		return pairs
-
-	def __len__(self) -> int:
-		return len(self.items)
-
-	def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
-		item = self.items[index]
-		image = Image.open(item.image_path).convert("RGB")
-		mask = Image.open(item.mask_path).convert("L")
-
-		image_t = self.image_tf(image)
-		mask_resized = self.mask_resize(mask)
-		mask_np = np.array(mask_resized, dtype=np.uint8)
-		# VOS2019 uses object IDs in mask; collapse all IDs > 0 into foreground=1.
-		target_np = (mask_np > 0).astype(np.int64)
-		target = torch.from_numpy(target_np)
-		return image_t, target
+from src.datasets.semantic_segmentation import SemanticSegmentationDataset
 
 
 def seed_everything(seed: int) -> None:
@@ -122,40 +45,101 @@ def make_model(num_classes: int, pretrained_backbone: bool = True) -> nn.Module:
 		num_classes=num_classes,
 		aux_loss=True,
 	)
+	# Freeze backbone feature extractor (ResNet-50) for this training run.
+	for p in model.backbone.parameters():
+		p.requires_grad = False
 	return model
 
+@torch.no_grad()
+def compute_miou(logits, targets, num_classes: int, ignore_index: int = 255):
+    """
+    logits: [B, C, H, W]
+    targets: [B, H, W]
+    """
+
+    preds = logits.argmax(dim=1)
+
+    ious = []
+
+    for cls in range(num_classes):
+        if cls == ignore_index:
+            continue
+
+        pred_i = (preds == cls)
+        target_i = (targets == cls)
+
+        # loại ignore pixel
+        valid = (targets != ignore_index)
+
+        pred_i = pred_i & valid
+        target_i = target_i & valid
+
+        inter = (pred_i & target_i).sum().item()
+        union = (pred_i | target_i).sum().item()
+
+        if union > 0:
+            ious.append(inter / union)
+
+    if len(ious) == 0:
+        return 0.0
+
+    return sum(ious) / len(ious)
 
 @torch.no_grad()
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict[str, float]:
-	model.eval()
-	total_loss = 0.0
-	total_correct = 0
-	total_pixels = 0
-	total_inter = 0
-	total_union = 0
+def evaluate(model, loader, device, num_classes: int, ignore_index: int = 255):
+    model.eval()
 
-	for images, targets in loader:
-		images = images.to(device, non_blocking=True)
-		targets = targets.to(device, non_blocking=True)
+    total_loss = 0.0
+    pixel_correct = 0
+    pixel_total = 0
 
-		logits = model(images)["out"]
-		loss = F.cross_entropy(logits, targets)
-		total_loss += float(loss.item()) * images.size(0)
+    # confusion matrix (num_classes x num_classes)
+    hist = torch.zeros((num_classes, num_classes), dtype=torch.float64)
 
-		pred = logits.argmax(dim=1)
-		total_correct += int((pred == targets).sum().item())
-		total_pixels += int(targets.numel())
+    for batch in loader:
+        images = batch['image'].to(device)
+        targets = batch['mask'].to(device)
 
-		pred_fg = pred == 1
-		gt_fg = targets == 1
-		total_inter += int((pred_fg & gt_fg).sum().item())
-		total_union += int((pred_fg | gt_fg).sum().item())
+        logits = model(images)["out"]
 
-	avg_loss = total_loss / max(1, len(loader.dataset))
-	pix_acc = total_correct / max(1, total_pixels)
-	iou_fg = total_inter / max(1, total_union)
-	return {"loss": avg_loss, "pixel_acc": pix_acc, "iou_fg": iou_fg}
+        loss = F.cross_entropy(logits, targets, ignore_index=ignore_index)
+        total_loss += loss.item() * images.size(0)
 
+        preds = logits.argmax(dim=1)
+
+        # ===== pixel accuracy =====
+        valid = targets != ignore_index
+        pixel_correct += (preds[valid] == targets[valid]).sum().item()
+        pixel_total += valid.sum().item()
+
+        # ===== update confusion matrix =====
+        preds = preds.cpu()
+        targets = targets.cpu()
+
+        mask = targets != ignore_index
+        preds = preds[mask]
+        targets = targets[mask]
+
+        k = num_classes * targets + preds
+        hist += torch.bincount(k, minlength=num_classes**2).reshape(num_classes, num_classes)
+
+    # ===== IoU =====
+    intersection = torch.diag(hist)
+    union = hist.sum(1) + hist.sum(0) - intersection
+
+    iou = intersection / (union + 1e-6)
+
+    miou = iou.mean().item()
+
+    avg_loss = total_loss / len(loader.dataset)
+    pixel_acc = pixel_correct / max(1, pixel_total)
+
+    return {
+        "loss": avg_loss,
+        "pixel_acc": pixel_acc,
+        "miou": miou,
+        "per_class_iou": iou.cpu().numpy()
+    }
 
 def train_one_epoch(
 	model: nn.Module,
@@ -168,13 +152,19 @@ def train_one_epoch(
 	model.train()
 	total_loss = 0.0
 
-	for step, (images, targets) in enumerate(loader, start=1):
-		images = images.to(device, non_blocking=True)
-		targets = targets.to(device, non_blocking=True)
+	pbar = tqdm(loader)
 
+	for step, batch in enumerate(pbar, start=1):
+		images = batch["image"].to(device, non_blocking=True)
+		targets = batch["mask"].to(device, non_blocking=True)
 		out = model(images)
-		main_loss = F.cross_entropy(out["out"], targets)
-		aux_loss = F.cross_entropy(out["aux"], targets) if "aux" in out else 0.0
+		# print("num_classes:", out["out"].shape[1])
+		# print("target max:", targets.max())
+		# print("target min:", targets.min())
+		# print("out max:", out["out"].max())
+		# print("out min:", out["out"].min())
+		main_loss = F.cross_entropy(out["out"], targets, ignore_index=255)
+		aux_loss = F.cross_entropy(out["aux"], targets, ignore_index=255) if "aux" in out else 0.0
 
 		if isinstance(aux_loss, torch.Tensor):
 			loss = main_loss + aux_weight * aux_loss
@@ -185,13 +175,21 @@ def train_one_epoch(
 		loss.backward()
 		optimizer.step()
 
+  
+		
 		total_loss += float(loss.item()) * images.size(0)
 
-		if step % print_freq == 0 or step == len(loader):
-			print(
-				f"[train] step {step:04d}/{len(loader):04d} "
-				f"loss={loss.item():.4f} main={main_loss.item():.4f}"
-			)
+		# ✅ thêm dòng này
+		pbar.set_postfix(
+			loss=f"{loss.item():.4f}",
+			main=f"{main_loss.item():.4f}",
+		)
+		
+		# if step % print_freq == 0 or step == len(loader):
+		# 	print(
+		# 		f"[train] step {step:04d}/{len(loader):04d} "
+		# 		f"loss={loss.item():.4f} main={main_loss.item():.4f}"
+		# 	)
 
 	avg_loss = total_loss / max(1, len(loader.dataset))
 	return {"loss": avg_loss}
@@ -202,7 +200,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--config",
 		type=Path,
-		default=Path("configs/vos2019/deeplabv3_resnet50.yaml"),
+		default=Path("configs/vspw/deeplabv3_resnet50.yaml"),
 		help="Path to yaml config file",
 	)
 	parser.add_argument(
@@ -292,6 +290,7 @@ def main() -> None:
 	)
 	print_freq = int(_resolve_setting(args.print_freq, train_cfg.get("print_freq"), 100))
 	aux_weight = float(_resolve_setting(args.aux_weight, model_cfg.get("aux_weight"), 0.4))
+	num_classes = int(model_cfg.get("num_classes", 2))
 	max_train_samples = _resolve_setting(
 		args.max_train_samples, data_cfg.get("max_train_samples"), None
 	)
@@ -312,17 +311,30 @@ def main() -> None:
 		save_dir = PROJECT_ROOT / save_dir
 	save_dir.mkdir(parents=True, exist_ok=True)
 
-	train_dir = data_root / train_split
-	valid_dir = data_root / valid_split
+	# VSPW layout uses data_root/data/<video> with split lists at data_root/*.txt
+	if (data_root / "data").exists():
+		train_dir = data_root
+		valid_dir = data_root
+		vspw_train = train_split
+		vspw_valid = valid_split
+	else:
+		train_dir = data_root / train_split
+		valid_dir = data_root / valid_split
+		vspw_train = None
+		vspw_valid = None
 
-	train_ds = VOS2019BinarySegmentationDataset(
+	train_ds = SemanticSegmentationDataset(
 		split_dir=train_dir,
+		num_classes=num_classes,
+		vspw_split=vspw_train,
 		image_size=(height, width),
 		max_samples=max_train_samples,
 		seed=seed,
 	)
-	valid_ds = VOS2019BinarySegmentationDataset(
+	valid_ds = SemanticSegmentationDataset(
 		split_dir=valid_dir,
+		num_classes=num_classes,
+		vspw_split=vspw_valid,
 		image_size=(height, width),
 		max_samples=max_valid_samples,
 		seed=seed,
@@ -343,8 +355,9 @@ def main() -> None:
 		pin_memory=(device.type == "cuda"),
 	)
 
-	num_classes = int(model_cfg.get("num_classes", 2))
 	pretrained_backbone = bool(model_cfg.get("pretrained_backbone", True))
+	print(num_classes, pretrained_backbone)
+
 	model = make_model(num_classes=num_classes, pretrained_backbone=pretrained_backbone).to(device)
 	optimizer = torch.optim.AdamW(
 		model.parameters(), lr=lr, weight_decay=weight_decay
@@ -399,14 +412,14 @@ def main() -> None:
 			aux_weight=aux_weight,
 			print_freq=max(1, print_freq),
 		)
-		val_stats = evaluate(model=model, loader=valid_loader, device=device)
+		val_stats = evaluate(model=model, loader=valid_loader, device=device, num_classes=num_classes)
 
 		row = {
 			"epoch": epoch,
 			"train_loss": train_stats["loss"],
 			"val_loss": val_stats["loss"],
 			"val_pixel_acc": val_stats["pixel_acc"],
-			"val_iou_fg": val_stats["iou_fg"],
+			"val_miou": val_stats["miou"],
 		}
 		history.append(row)
 
@@ -414,8 +427,18 @@ def main() -> None:
 			f"[epoch {epoch}] train_loss={row['train_loss']:.4f} "
 			f"val_loss={row['val_loss']:.4f} "
 			f"val_pixel_acc={row['val_pixel_acc']:.4f} "
-			f"val_iou_fg={row['val_iou_fg']:.4f}"
+			f"val_miou={row['val_miou']:.4f}"
 		)
+
+		log_path = save_dir / "train_log.txt"
+		with log_path.open("a", encoding="utf-8") as f:
+			f.write(
+				f"epoch={epoch} "
+				f"train_loss={row['train_loss']:.6f} "
+				f"val_loss={row['val_loss']:.6f} "
+				f"val_pixel_acc={row['val_pixel_acc']:.6f} "
+				f"val_miou={row['val_miou']:.6f}\n"
+			)
 
 		ckpt_last = save_dir / "deeplabv3_resnet50_last.pt"
 		torch.save(
@@ -429,8 +452,8 @@ def main() -> None:
 			ckpt_last,
 		)
 
-		if row["val_iou_fg"] > best_iou:
-			best_iou = row["val_iou_fg"]
+		if row["val_miou"] > best_iou:
+			best_iou = row["val_miou"]
 			ckpt_best = save_dir / "deeplabv3_resnet50_best.pt"
 			torch.save(
 				{
@@ -442,12 +465,13 @@ def main() -> None:
 				},
 				ckpt_best,
 			)
-			print(f"Saved new best model @ {ckpt_best} (val_iou_fg={best_iou:.4f})")
+			print(f"Saved new best model @ {ckpt_best} (val_miou={best_iou:.4f})")
 
 	metrics_path = save_dir / "metrics.json"
 	with metrics_path.open("w", encoding="utf-8") as f:
 		json.dump(history, f, indent=2)
 	print(f"Training done. Metrics saved to {metrics_path}")
+	print(f"Training log saved to {save_dir / 'train_log.txt'}")
 
 
 if __name__ == "__main__":

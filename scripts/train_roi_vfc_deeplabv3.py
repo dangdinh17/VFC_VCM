@@ -29,7 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.datasets import VOS2019BinarySegmentationDataset
+from src.datasets import SemanticSegmentationDataset
 from src.models.backbone import FeatureExtraction, PerceptionExtraction
 from src.models.feature_space_transfer import FeatureSpaceTransfer
 from src.models.roi_vfc import ROI_VFC
@@ -187,6 +187,7 @@ def _build_deeplab_feature_adapter(
     if weights_path is not None:
         ckpt_path = weights_path if weights_path.is_absolute() else PROJECT_ROOT / weights_path
         if not ckpt_path.exists():
+            # pass
             raise FileNotFoundError(f"DeepLab checkpoint not found: {ckpt_path}")
 
         ckpt = torch.load(str(ckpt_path), map_location=device)
@@ -227,14 +228,114 @@ def _build_comet_experiment(logging_cfg: Dict[str, Any], run_name: str):
     exp.set_name(run_name)
     return exp
 
+def _append_metrics(save_path: Path, history: List[Dict[str, Any]]) -> None:
+    existing: List[Dict[str, Any]] = []
+    if save_path.exists():
+        try:
+            with save_path.open("r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except json.JSONDecodeError:
+            existing = []
 
-def _compute_binary_iou(logits: torch.Tensor, target: torch.Tensor) -> float:
+    if not isinstance(existing, list):
+        existing = []
+
+    if len(existing) < len(history):
+        existing.extend(history[len(existing) :])
+    else:
+        existing = history
+
+    with save_path.open("w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2)
+
+def _compute_miou(logits: torch.Tensor, target: torch.Tensor, num_classes: int, ignore_index: int = 255) -> float:
+    """
+    logits: (B, C, H, W)
+    target: (B, H, W)
+    """
+
     pred = logits.argmax(dim=1)
-    pred_fg = pred == 1
-    gt_fg = target == 1
-    inter = (pred_fg & gt_fg).sum().item()
-    union = (pred_fg | gt_fg).sum().item()
-    return float(inter) / float(max(union, 1))
+
+    pred = pred.view(-1)
+    target = target.view(-1)
+
+    mask = target != ignore_index
+    pred = pred[mask]
+    target = target[mask]
+
+    iou_per_class = []
+
+    for cls in range(num_classes):
+        pred_c = pred == cls
+        gt_c = target == cls
+
+        inter = (pred_c & gt_c).sum().item()
+        union = (pred_c | gt_c).sum().item()
+
+        if union == 0:
+            continue
+
+        iou_per_class.append(inter / union)
+
+    if len(iou_per_class) == 0:
+        return 0.0
+
+    return float(sum(iou_per_class) / len(iou_per_class))
+
+@torch.no_grad()
+def _validate_deeplab_baseline(
+    *,
+    dataloader: DataLoader,
+    feature_extractor: FeatureExtraction,
+    deeplab_adapter: DeepLabFeatureAdapter,
+    device: torch.device,
+    aux_weight: float,
+    use_tqdm: bool,
+    num_classes: int,
+) -> Dict[str, float]:
+    feature_extractor.eval()
+    deeplab_adapter.eval()
+
+    totals = {
+        "l_task": AverageMeter(),
+        "iou_fg": AverageMeter(),
+        "fg_ratio_gt": AverageMeter(),
+        "fg_ratio_pred": AverageMeter(),
+    }
+
+    iterator = dataloader
+    if use_tqdm:
+        iterator = tqdm(dataloader, desc="deeplab_baseline", leave=False)
+
+    for batch in iterator:
+        image = batch["image"].to(device, non_blocking=True)
+        mask = batch["mask"].to(device, non_blocking=True)
+
+        has_time = image.dim() == 5
+        if has_time:
+            T = image.shape[1]
+        else:
+            T = 1
+
+        for t in range(T):
+            img_t = image[:, t] if has_time else image
+            mask_t = mask[:, t] if has_time else mask
+
+            src_feat = feature_extractor(img_t)
+            seg_out = deeplab_adapter(src_feat, return_features=False)
+            logits = F.interpolate(seg_out["out"], size=mask_t.shape[-2:], mode="bilinear", align_corners=False)
+
+            seg_loss = F.cross_entropy(logits, mask_t)
+            if "aux" in seg_out:
+                aux_logits = F.interpolate(seg_out["aux"], size=mask_t.shape[-2:], mode="bilinear", align_corners=False)
+                seg_loss = seg_loss + aux_weight * F.cross_entropy(aux_logits, mask_t)
+
+            pred = logits.argmax(dim=1)
+            totals["l_task"].update(float(seg_loss.item()))
+            totals["iou_fg"].update(float(_compute_miou(logits, mask_t, num_classes=num_classes)))
+
+
+    return {k: m.avg for k, m in totals.items()}
 
 
 def _build_dataloaders(cfg: Dict[str, Any], num_workers: int, train_bs: int, val_bs: int, seed: int):
@@ -248,11 +349,18 @@ def _build_dataloaders(cfg: Dict[str, Any], num_workers: int, train_bs: int, val
     train_crop_type = str(data_cfg.get("train_crop_type", "random")).lower()
     valid_crop_type = str(data_cfg.get("valid_crop_type", "center")).lower()
     pad_if_needed = bool(data_cfg.get("pad_if_needed", True))
-    train_dir = data_root / str(data_cfg.get("train_split", "train"))
-    valid_dir = data_root / str(data_cfg.get("valid_split", "valid"))
+    # For VSPW the repository uses data_root/data/<video> and split lists at data_root/*.txt
+    # detect VSPW-style by presence of data_root/data
+    if (data_root / "data").exists():
+        train_dir = data_root
+        valid_dir = data_root
+    else:
+        train_dir = data_root / str(data_cfg.get("train_split", "train"))
+        valid_dir = data_root / str(data_cfg.get("valid_split", "valid"))
 
-    train_ds = VOS2019BinarySegmentationDataset(
+    train_ds = SemanticSegmentationDataset(
         split_dir=train_dir,
+        vspw_split=(str(data_cfg.get("train_split")) if "vspw" in str(data_root.name).lower() or "vspw" in str(data_root) else None),
         image_size=(int(image_size[0]), int(image_size[1])),
         spatial_transform=spatial_transform,
         crop_type=train_crop_type,
@@ -261,9 +369,11 @@ def _build_dataloaders(cfg: Dict[str, Any], num_workers: int, train_bs: int, val
         seq_stride=int(data_cfg.get("seq_stride", data_cfg.get("seq_len", 1))),
         max_samples=data_cfg.get("max_train_samples"),
         seed=seed,
+        num_classes=int(data_cfg.get("num_classes", 124)),
     )
-    val_ds = VOS2019BinarySegmentationDataset(
+    val_ds = SemanticSegmentationDataset(
         split_dir=valid_dir,
+        vspw_split=(str(data_cfg.get("valid_split")) if "vspw" in str(data_root.name).lower() or "vspw" in str(data_root) else None),
         image_size=(int(image_size[0]), int(image_size[1])),
         spatial_transform=spatial_transform,
         crop_type=valid_crop_type,
@@ -272,6 +382,7 @@ def _build_dataloaders(cfg: Dict[str, Any], num_workers: int, train_bs: int, val
         seq_stride=int(data_cfg.get("seq_stride", data_cfg.get("seq_len", 1))),
         max_samples=data_cfg.get("max_valid_samples"),
         seed=seed,
+        num_classes=int(data_cfg.get("num_classes", 124)),
     )
 
     train_loader = DataLoader(
@@ -446,6 +557,8 @@ def _run_epoch(
         "rate_term": AverageMeter(),
         "feature_loss": AverageMeter(),
         "iou_fg": AverageMeter(),
+        "fg_ratio_gt": AverageMeter(),
+        "fg_ratio_pred": AverageMeter(),
     }
     num_batches = 0
 
@@ -506,6 +619,8 @@ def _run_epoch(
             "rate_term": AverageMeter(),
             "feature_loss": AverageMeter(),
             "iou_fg": AverageMeter(),
+            "fg_ratio_gt": AverageMeter(),
+            "fg_ratio_pred": AverageMeter(),
         }
 
         for t in range(T):
@@ -606,7 +721,9 @@ def _run_epoch(
             batch_meters["feature_loss"].update(
                 float((codec_parts["d_f"] + fst_parts["d_mid"] + fst_parts["d_high"]).item())
             )
-            batch_meters["iou_fg"].update(float(_compute_binary_iou(logits.detach(), mask_t)))
+            pred = logits.detach().argmax(dim=1)
+            batch_meters["iou_fg"].update(float(_compute_miou(logits.detach(), mask_t, num_classes=2)))
+
 
             # backprop per-frame (accumulate gradients across frames)
             if is_train and optimizer is not None:
@@ -636,6 +753,7 @@ def _run_epoch(
                     f"{split}/batch_fst_feature_loss_dhigh": float(batch_metrics["d_high"]),
                     f"{split}/batch_image_loss_dx": float(batch_metrics["d_x"]),
                     f"{split}/batch_iou_fg": float(batch_metrics["iou_fg"]),
+
                 },
                 epoch=epoch,
                 step=step,
@@ -717,6 +835,7 @@ def main() -> None:
     train_bs = int(_resolve_setting(args.train_batch_size, training_cfg.get("train_batch_size"), 8))
     val_bs = int(_resolve_setting(args.valid_batch_size, training_cfg.get("valid_batch_size"), 1))
     num_workers = int(training_cfg.get("num_workers", 4))
+    num_classes = int(model_cfg.get("data", {}).get("num_classes", 124))
     device = _resolve_device(_resolve_setting(args.device, training_cfg.get("device"), "auto"))
 
     if args.max_train_samples is not None:
@@ -799,7 +918,7 @@ def main() -> None:
     deeplab_adapter = _build_deeplab_feature_adapter(
         pretrained=bool(deeplab_cfg.get("pretrained", True)),
         device=device,
-        num_classes=deeplab_num_classes,
+        num_classes=num_classes,
         weights_path=Path(deeplab_weights_path) if deeplab_weights_path else None,
     )
     if bool(deeplab_cfg.get("freeze", True)):
@@ -852,8 +971,8 @@ def main() -> None:
         "experiment_name": run_name,
         "seed": seed,
         "device": str(device),
-    "epochs": total_epochs,
-    "training_stages": training_stages,
+        "epochs": total_epochs,
+        "training_stages": training_stages,
         "train_batch_size": train_bs,
         "valid_batch_size": val_bs,
         "num_workers": num_workers,
@@ -873,6 +992,7 @@ def main() -> None:
     use_tqdm = bool(logging_cfg.get("use_tqdm", True))
     log_batch_metrics = bool(logging_cfg.get("log_batch_metrics", True))
     batch_log_interval = int(logging_cfg.get("batch_log_interval", 1))
+    auto_load_best_for_fst = bool(training_cfg.get("auto_load_best_for_fst", False))
     history = []
     best_val = float("inf")
     resume_ckpt = None
@@ -932,6 +1052,22 @@ def main() -> None:
 
         global_epoch = next_global_epoch - 1
 
+    baseline_metrics = _validate_deeplab_baseline(
+        dataloader=val_loader,
+        feature_extractor=roi_vfc.feat_extraction,
+        deeplab_adapter=deeplab_adapter,
+        device=device,
+        aux_weight=aux_weight,
+        use_tqdm=use_tqdm,
+        num_classes=num_classes,
+    )
+    print(
+        "DeepLab baseline (src features) on val: "
+        f"iou_fg={baseline_metrics['iou_fg']:.4f} "
+        f"l_task={baseline_metrics['l_task']:.4f} "
+
+    )
+
     comet_exp = _build_comet_experiment(logging_cfg, run_name)
     if comet_exp is not None:
         resolved_config.setdefault("comet", {})["experiment_key"] = comet_exp.get_key()
@@ -948,6 +1084,13 @@ def main() -> None:
 
         if stage_idx < start_stage_idx:
             continue
+
+        if auto_load_best_for_fst and stage_optimize == "fst" and resume_ckpt is None:
+            best_path = save_dir / "best.pt"
+            if best_path.exists():
+                best_ckpt = torch.load(str(best_path), map_location=device)
+                roi_vfc.load_state_dict(best_ckpt.get("roi_vfc_state", {}), strict=False)
+                print(f"Loaded best checkpoint before FST stage: {best_path}")
 
         _set_module_trainability(roi_vfc, roi_base_requires_grad, enabled=stage_optimize in {"codec", "both"})
         _set_module_trainability(
@@ -1061,7 +1204,8 @@ def main() -> None:
                 f"total={train_metrics['total_loss']:.4f} "
                 f"codec={train_metrics['l_codec']:.4f} fst={train_metrics['l_fst']:.4f} "
                 f"rd={train_metrics['rate_term']:.4f} feature={train_metrics['feature_loss']:.4f} "
-                f"(d_f={train_metrics['d_f']:.4f}, d_mid={train_metrics['d_mid']:.4f}, d_high={train_metrics['d_high']:.4f})"
+                f"(d_f={train_metrics['d_f']:.4f}, d_mid={train_metrics['d_mid']:.4f}, d_high={train_metrics['d_high']:.4f}) "
+                f"fg_gt={train_metrics['fg_ratio_gt']:.4f} fg_pred={train_metrics['fg_ratio_pred']:.4f}"
             )
             print(
                 "val:   "
@@ -1069,6 +1213,7 @@ def main() -> None:
                 f"codec={val_metrics['l_codec']:.4f} fst={val_metrics['l_fst']:.4f} "
                 f"rd={val_metrics['rate_term']:.4f} feature={val_metrics['feature_loss']:.4f} "
                 f"iou_fg={val_metrics['iou_fg']:.4f} "
+                f"fg_gt={val_metrics['fg_ratio_gt']:.4f} fg_pred={val_metrics['fg_ratio_pred']:.4f} "
                 f"(d_f={val_metrics['d_f']:.4f}, d_mid={val_metrics['d_mid']:.4f}, d_high={val_metrics['d_high']:.4f})"
             )
 
@@ -1106,6 +1251,9 @@ def main() -> None:
 
             if is_best:
                 torch.save(ckpt, save_dir / "best.pt")
+                print('saved best checkpoint')
+
+            _append_metrics(save_dir / "metrics.json", history)
 
     with (save_dir / "metrics.json").open("w", encoding="utf-8") as f:
         json.dump(history, f, indent=2)

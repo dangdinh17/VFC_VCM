@@ -42,7 +42,7 @@ data:
 
 training:
   epochs: 30
-  resume_from: null
+  resume_from: outputs/roi_vfc_deeplabv3_ytvos_codec_bitrate16/epoch_019.pt
   train_batch_size: 4
   valid_batch_size: 1
   lr: 1.0e-4

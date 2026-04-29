@@ -1,4 +1,4 @@
-experiment_name: roi_vfc_deeplabv3_ytvos_codec_bitrate16
+experiment_name: roi_vfc_deeplabv3_vspw_codec_bitrate16
 seed: 42
 
 model:
@@ -27,8 +27,8 @@ model:
     aux_weight: 0.4
 
 data:
-  dataset_name: ytvos
-  data_root: data/VOS2019
+  dataset_name: vspw
+  data_root: data/VSPW
   train_split: train
   valid_split: valid
   image_size: [128, 128]
@@ -36,20 +36,22 @@ data:
   train_crop_type: random   # random | center
   valid_crop_type: center   # random | center
   pad_if_needed: true
-  max_train_samples: null
-  max_valid_samples: null
+  max_train_samples: 1
+  max_valid_samples: 1
+  seq_len: 8
+  num_classes: 124
 
 training:
   epochs: 30
-  train_batch_size: 8
+  resume_from: null
+  train_batch_size: 4
   valid_batch_size: 1
   lr: 1.0e-4
   weight_decay: 1.0e-4
-  num_workers: 4
+  num_workers: 8
   device: auto
   print_freq: 20
   stages:
-    # Table 1 - Stage 1: 0.5 * lambda_r * R_y + lambda_f D_f + lambda_c D_c + lambda_p D_p
     - name: codec_stage_1
       optimize: codec
       epochs: 4
@@ -58,7 +60,6 @@ training:
       codec:
         rate_scale: 0.5
         include_rz: false
-    # Table 1 - Stage 2: 0.5 * lambda_r * (R_y + R_z)
     - name: codec_stage_2
       optimize: codec
       epochs: 4
@@ -67,7 +68,6 @@ training:
       codec:
         rate_scale: 0.5
         include_rz: true
-    # Table 1 - Stage 3: lambda_r * (R_y + R_z)
     - name: codec_stage_3
       optimize: codec
       epochs: 4
@@ -76,7 +76,6 @@ training:
       codec:
         rate_scale: 1.0
         include_rz: true
-    # Table 1 - Stage 4: same loss as stage 3, lower LR
     - name: codec_stage_4
       optimize: codec
       epochs: 4
@@ -85,7 +84,6 @@ training:
       codec:
         rate_scale: 1.0
         include_rz: true
-    # Table 1 - Stage 5: same loss as stage 3, lowest LR
     - name: codec_stage_5
       optimize: codec
       epochs: 4
@@ -94,7 +92,6 @@ training:
       codec:
         rate_scale: 1.0
         include_rz: true
-    # Stage 2 (paper): optimize FST for downstream segmentation after codec convergence
     - name: fst_stage_1
       optimize: fst
       epochs: 10
@@ -106,15 +103,11 @@ training:
 
 loss_weights:
   codec:
-    # Eq.(5): L_codec = λ_R(R_r+R_m) + λ_f D_f + λ_c D_c + λ_p D_p
-    # Implementation details: lambda_f=16, lambda_c=0.1*lambda_f=1.6, lambda_p=4
     lambda_r: 16.0
     lambda_f: 16.0
     lambda_c: 1.6
     lambda_p: 4.0
   fst:
-    # Eq.(7): L_FST = λ_task L_task + λ_x D_x + λ_mid D_mid + λ_high D_high
-    # Semantic segmentation setting (Table 2)
     lambda_task: 10.0
     lambda_x: 1024.0
     lambda_mid: 16.0
@@ -127,9 +120,10 @@ logging:
   comet:
     enabled: true
     api_key: mkfmxVIjacb8h74qKO6NzPdPN
+    experiment_key: bc4feb6440c14842bc6d19dd3a5b6fce
     project_name: roi-vfc
     workspace: dangdinh17
 
 output:
-  save_dir: outputs/roi_vfc_deeplabv3_ytvos_codec_bitrate16
+  save_dir: outputs/roi_vfc_deeplabv3_vspw_codec_bitrate16
   save_every_epoch: true

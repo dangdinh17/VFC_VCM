@@ -1,0 +1,31 @@
+# DeepLabV3-ResNet50 training config for VOS2019
+
+experiment_name: deeplabv3_vos2019_resnet50
+seed: 42
+
+model:
+  arch: deeplabv3_resnet50
+  backbone: resnet50
+  num_classes: 124
+  pretrained_backbone: true
+  aux_weight: 0.4
+
+data:
+  data_root: data/VSPW
+  train_split: train
+  valid_split: valid
+  image_size: [128, 128]  # [height, width]
+  max_train_samples: null
+  max_valid_samples: 1000
+
+training:
+  epochs: 5
+  batch_size: 16
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  num_workers: 4
+  print_freq: 100
+  device: auto
+
+output:
+  save_dir: outputs/deeplabv3_vos2019_resnet50

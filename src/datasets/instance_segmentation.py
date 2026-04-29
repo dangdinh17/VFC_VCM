@@ -19,7 +19,7 @@ class VOSItem:
 	mask_path: Path
 
 
-class VOS2019BinarySegmentationDataset(Dataset):
+class InstanceSegmentationDataset(Dataset):
 	"""Binary segmentation dataset for VOS2019/YTVOS-style folder layout.
 
 	Expected split structure:
@@ -34,6 +34,8 @@ class VOS2019BinarySegmentationDataset(Dataset):
 	def __init__(
 		self,
 		split_dir: Path,
+		num_classes: int = 124,
+		vspw_split: Optional[str] = None,
 		image_size: Tuple[int, int] = (384, 640),
 		spatial_transform: str = "resize",
 		crop_type: str = "center",
@@ -45,8 +47,30 @@ class VOS2019BinarySegmentationDataset(Dataset):
 	) -> None:
 		super().__init__()
 		self.split_dir = Path(split_dir)
+		self.num_classes = num_classes
+		# layout detection: support standard YTVOS/VOS (JPEGImages/Annotations)
+		# and VSPW layout which stores videos under `data/<video>/origin` and `data/<video>/mask`
+		self.layout = "ytvos"
+		self.vspw_split = str(vspw_split).lower() if vspw_split is not None else None
+
 		self.img_root = self.split_dir / "JPEGImages"
 		self.mask_root = self.split_dir / "Annotations"
+
+		# detect VSPW-style dataset when a `data/` directory exists with per-video folders
+		if not (self.img_root.exists() and self.mask_root.exists()):
+			# fallback to VSPW structure: split_dir/data/<video>/{origin,mask}
+			vspw_data_dir = self.split_dir / "data"
+			if vspw_data_dir.exists() and vspw_data_dir.is_dir():
+				self.layout = "vspw"
+				self.vspw_root = vspw_data_dir
+				# for backward compat, set img_root/mask_root to the vspw root
+				self.img_root = self.vspw_root
+				self.mask_root = self.vspw_root
+
+		if self.layout == "ytvos" and (not self.img_root.exists() or not self.mask_root.exists()):
+			raise FileNotFoundError(
+				f"Missing JPEGImages/Annotations under {self.split_dir}."
+			)
 
 		if not self.img_root.exists() or not self.mask_root.exists():
 			raise FileNotFoundError(
@@ -91,13 +115,62 @@ class VOS2019BinarySegmentationDataset(Dataset):
 
 	def _collect_items(self, max_samples: Optional[int], seed: int) -> List[VOSItem]:
 		pairs: List[VOSItem] = []
-		for video_dir in sorted(self.mask_root.iterdir()):
-			if not video_dir.is_dir():
-				continue
-			for mask_path in sorted(video_dir.glob("*.png")):
-				img_path = self.img_root / video_dir.name / f"{mask_path.stem}.jpg"
-				if img_path.exists():
-					pairs.append(VOSItem(image_path=img_path, mask_path=mask_path))
+		if self.layout == "vspw":
+			# Optionally read a split list (train.txt / val.txt / test.txt) located at split_dir
+			videos_filter = None
+			# prefer files like <split>.txt under split_dir (e.g., data/VSPW/train.txt)
+			parent_txt_dir = self.split_dir
+			if parent_txt_dir is None:
+				parent_txt_dir = self.split_dir
+			if self.vspw_split is None:
+				# try to infer from split_dir name
+				name = str(self.split_dir.name).lower()
+				if "train" in name:
+					self.vspw_split = "train"
+				elif "val" in name:
+					self.vspw_split = "val"
+				elif "test" in name:
+					self.vspw_split = "test"
+
+			if self.vspw_split is not None:
+				txt_path = parent_txt_dir / f"{self.vspw_split}.txt"
+				if not txt_path.exists():
+					# also try parent of split_dir (in case split_dir was set to data/VSPW/data)
+					alt = self.split_dir.parent / f"{self.vspw_split}.txt"
+					if alt.exists():
+						txt_path = alt
+				if txt_path.exists():
+					with txt_path.open("r", encoding="utf-8") as f:
+						lines = [l.strip() for l in f.readlines() if l.strip()]
+						videos_filter = set(lines)
+
+			# iterate video folders under vspw_root
+			for video_dir in sorted(self.vspw_root.iterdir()):
+				if not video_dir.is_dir():
+					continue
+				video_id = video_dir.name
+				if videos_filter is not None and video_id not in videos_filter:
+					continue
+				mask_dir = video_dir / "mask"
+				img_dir = video_dir / "origin"
+				if not mask_dir.exists() or not img_dir.exists():
+					continue
+				for mask_path in sorted(mask_dir.glob("*.png")):
+					# ignore metadata files that start with '._'
+					if mask_path.name.startswith("._"):
+						continue
+					base_stem = mask_path.stem
+					img_path = img_dir / f"{base_stem}.jpg"
+					if img_path.exists():
+						pairs.append(VOSItem(image_path=img_path, mask_path=mask_path))
+		else:
+			for video_dir in sorted(self.mask_root.iterdir()):
+				if not video_dir.is_dir():
+					continue
+				for mask_path in sorted(video_dir.glob("*.png")):
+					img_path = self.img_root / video_dir.name / f"{mask_path.stem}.jpg"
+					if img_path.exists():
+						pairs.append(VOSItem(image_path=img_path, mask_path=mask_path))
 
 		if max_samples is not None and max_samples < len(pairs):
 			rng = random.Random(seed)
@@ -189,9 +262,9 @@ class VOS2019BinarySegmentationDataset(Dataset):
 				image_raw = self.to_tensor(image)
 				image_norm = self.norm_image_tf(image_raw.clone())
 
-				mask_np = np.array(mask, dtype=np.uint8)
-				mask_bin = (mask_np > 0).astype(np.int64)
-				target = torch.from_numpy(mask_bin)
+				mask_np = np.array(mask, dtype=np.int64)
+				# mask_bin = (mask_np > 0).astype(np.int64)
+				target = torch.from_numpy(mask_np)
 
 				images.append(image_norm)
 				images_raw.append(image_raw)
@@ -225,9 +298,12 @@ class VOS2019BinarySegmentationDataset(Dataset):
 		image_raw = self.to_tensor(image)
 		image_norm = self.norm_image_tf(image_raw.clone())
 
-		mask_np = np.array(mask, dtype=np.uint8)
-		mask_bin = (mask_np > 0).astype(np.int64)
-		target = torch.from_numpy(mask_bin)
+		mask_np = np.array(mask, dtype=np.int64)
+		# print(np.unique(mask_np))
+		# mask_bin = (mask_np > 0).astype(np.int64)	
+		mask_np[mask_np >= self.num_classes] = 255
+		target = torch.from_numpy(mask_np)
+		# print(target.min(), target.max())
 
 		return {
 			"image": image_norm,

@@ -2,7 +2,7 @@
 
 from .test_dataset import TestVideoFeatureDataset, test_video_feature_collate_fn
 from .train_dataset import TrainVideoFeatureDataset, train_video_feature_collate_fn
-from .vos2019_segmentation import VOS2019BinarySegmentationDataset
+from .semantic_segmentation import SemanticSegmentationDataset
 
 try:
 	from .single_dataset import (
@@ -24,7 +24,7 @@ __all__ = [
 	"TestSequenceDataset",
 	"TrainVideoFeatureDataset",
 	"TestVideoFeatureDataset",
-	"VOS2019BinarySegmentationDataset",
+	"SemanticSegmentationDataset",
 	"train_video_feature_collate_fn",
 	"test_video_feature_collate_fn",
 ]

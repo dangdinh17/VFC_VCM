@@ -34,6 +34,20 @@ python scripts/train.py
 
 This will run the trainer for 2 iterations on random data and print loss, distortion and rate.
 
+Validate DeepLabV3 on YTVOS
+---------------------------
+
+Use the new validation script to measure DeepLabV3 baseline performance on the YTVOS-style dataset split:
+
+```bash
+python scripts/validate_deeplabv3_ytvos.py \
+	--config configs/ytvos/roi_vfc_deeplabv3_ytvos_codec_bitrate16.yaml \
+	--deeplab-weights outputs/deeplabv3_vos2019_resnet50/deeplabv3_resnet50_best.pt \
+	--output-json outputs/deeplabv3_ytvos_val.json
+```
+
+If you have retrained DeepLabV3 on YTVOS, point `--deeplab-weights` to the new checkpoint.
+
 Project structure
 -----------------
 See top-level structure in the repository root. Key modules live under `src/`.
