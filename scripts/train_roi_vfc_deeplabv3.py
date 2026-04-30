@@ -34,7 +34,7 @@ from src.models.backbone import FeatureExtraction, PerceptionExtraction
 from src.models.feature_space_transfer import FeatureSpaceTransfer
 from src.models.roi_vfc import ROI_VFC
 from src.utils import load_config, AverageMeter
-
+from src.evaluate import 
 
 def seed_everything(seed: int) -> None:
     random.seed(seed)
@@ -248,39 +248,7 @@ def _append_metrics(save_path: Path, history: List[Dict[str, Any]]) -> None:
     with save_path.open("w", encoding="utf-8") as f:
         json.dump(existing, f, indent=2)
 
-def _compute_miou(logits: torch.Tensor, target: torch.Tensor, num_classes: int, ignore_index: int = 255) -> float:
-    """
-    logits: (B, C, H, W)
-    target: (B, H, W)
-    """
 
-    pred = logits.argmax(dim=1)
-
-    pred = pred.view(-1)
-    target = target.view(-1)
-
-    mask = target != ignore_index
-    pred = pred[mask]
-    target = target[mask]
-
-    iou_per_class = []
-
-    for cls in range(num_classes):
-        pred_c = pred == cls
-        gt_c = target == cls
-
-        inter = (pred_c & gt_c).sum().item()
-        union = (pred_c | gt_c).sum().item()
-
-        if union == 0:
-            continue
-
-        iou_per_class.append(inter / union)
-
-    if len(iou_per_class) == 0:
-        return 0.0
-
-    return float(sum(iou_per_class) / len(iou_per_class))
 
 @torch.no_grad()
 def _validate_deeplab_baseline(

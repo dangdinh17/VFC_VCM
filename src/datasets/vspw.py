@@ -377,8 +377,8 @@ class VSPWSequenceDataset(Dataset):
         return {
             "image": image,
             "mask": mask,
-            "video_id": item.video_id,
-            "frame_id": item.frame_id,
+            "video_id": video_id,
+            "frame_id": frame_ids,
         }
 
     def __len__(self):
