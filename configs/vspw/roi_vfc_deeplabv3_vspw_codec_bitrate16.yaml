@@ -31,13 +31,13 @@ data:
   data_root: data/VSPW
   train_split: train
   valid_split: valid
-  image_size: [128, 128]
+  image_size: [256, 256]
   spatial_transform: crop   # crop | resize
   train_crop_type: random   # random | center
   valid_crop_type: center   # random | center
   pad_if_needed: true
-  max_train_samples: 1
-  max_valid_samples: 1
+  max_train_samples: null
+  max_valid_samples: null
   seq_len: 8
   num_classes: 124
 

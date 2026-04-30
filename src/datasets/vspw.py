@@ -193,7 +193,7 @@ class VSPWDataset(Dataset):
         image, mask = self._crop(image, mask)
 
         # augmentation
-        if self.augment:
+        if self.augment and self.split_dir == "train":
             image, mask = self._augment(image, mask)
 
         image = self.to_tensor(image)
@@ -296,7 +296,6 @@ class VSPWSequenceDataset(Dataset):
                     indices = range(i, i + self.seq_len)
                     
                     sampled_masks = [all_masks[idx] for idx in indices]
-                    sampled_images = []
                     seq_items = []
                     for mask_path in sampled_masks:
                         frame_id = mask_path.stem
