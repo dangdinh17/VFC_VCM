@@ -6,7 +6,9 @@ import io
 import tqdm
 
 def build_lmdb(root: Path, lmdb_path: Path, map_size):
-    env = lmdb.open(str(lmdb_path), map_size=map_size)
+    env = lmdb.open(str(lmdb_path), map_size=map_size,readahead=False,
+    meminit=False,
+    lock=False,)
 
     with env.begin(write=True) as txn:
         for video_dir in tqdm.tqdm((root / "data").iterdir()):
