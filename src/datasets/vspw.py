@@ -104,9 +104,12 @@ class VSPWDataset(Dataset):
                 m for m in mask_dir.glob("*.png") 
                 if not m.name.startswith("._")
             ])
-            start_idx = self.rng.randint(0, len(all_masks) - self.seq_len)
-            indices = range(start_idx, start_idx + self.seq_len)
-            sampled_masks = [all_masks[i] for i in indices]
+            if self.seq_len > 1:
+                start_idx = self.rng.randint(0, len(all_masks) - self.seq_len)
+                indices = range(start_idx, start_idx + self.seq_len)
+                sampled_masks = [all_masks[i] for i in indices]
+            else:
+                sampled_masks = all_masks
             for idx, mask_path in enumerate(sampled_masks):
                 
                 if mask_path.name.startswith("._"):
@@ -267,7 +270,7 @@ class VSPWSequenceDataset(Dataset):
         items: List[List[VSPWItem]] = []
         seq_items: List[VSPWItem] = []
         for video_dir in sorted(self.data_root.iterdir()):
-            seq_items = []
+            
             if not video_dir.is_dir():
                 continue
 
@@ -294,7 +297,7 @@ class VSPWSequenceDataset(Dataset):
                     
                     sampled_masks = [all_masks[idx] for idx in indices]
                     sampled_images = []
-                    
+                    seq_items = []
                     for mask_path in sampled_masks:
                         frame_id = mask_path.stem
                         img_path = img_dir / f"{mask_path.stem}.jpg"
