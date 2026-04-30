@@ -358,6 +358,32 @@ def _build_dataloaders(cfg: Dict[str, Any], num_workers: int, train_bs: int, val
         train_dir = data_root / str(data_cfg.get("train_split", "train"))
         valid_dir = data_root / str(data_cfg.get("valid_split", "valid"))
 
+    # train_ds = SemanticSegmentationDataset(
+    #     split_dir=train_dir,
+    #     vspw_split=(str(data_cfg.get("train_split")) if "vspw" in str(data_root.name).lower() or "vspw" in str(data_root) else None),
+    #     image_size=(int(image_size[0]), int(image_size[1])),
+    #     spatial_transform=spatial_transform,
+    #     crop_type=train_crop_type,
+    #     pad_if_needed=pad_if_needed,
+    #     seq_len=int(data_cfg.get("seq_len", 1)),
+    #     seq_stride=int(data_cfg.get("seq_stride", data_cfg.get("seq_len", 1))),
+    #     max_samples=data_cfg.get("max_train_samples"),
+    #     seed=seed,
+    #     num_classes=int(data_cfg.get("num_classes", 124)),
+    # )
+    # val_ds = SemanticSegmentationDataset(
+    #     split_dir=valid_dir,
+    #     vspw_split=(str(data_cfg.get("valid_split")) if "vspw" in str(data_root.name).lower() or "vspw" in str(data_root) else None),
+    #     image_size=(int(image_size[0]), int(image_size[1])),
+    #     spatial_transform=spatial_transform,
+    #     crop_type=valid_crop_type,
+    #     pad_if_needed=pad_if_needed,
+    #     seq_len=int(data_cfg.get("seq_len", 1)),
+    #     seq_stride=int(data_cfg.get("seq_stride", data_cfg.get("seq_len", 1))),
+    #     max_samples=data_cfg.get("max_valid_samples"),
+    #     seed=seed,
+    #     num_classes=int(data_cfg.get("num_classes", 124)),
+    # )
     train_ds = SemanticSegmentationDataset(
         split_dir=train_dir,
         vspw_split=(str(data_cfg.get("train_split")) if "vspw" in str(data_root.name).lower() or "vspw" in str(data_root) else None),

@@ -1,21 +1,8 @@
 """Datasets package."""
-
 from .test_dataset import TestVideoFeatureDataset, test_video_feature_collate_fn
 from .train_dataset import TrainVideoFeatureDataset, train_video_feature_collate_fn
-from .semantic_segmentation import SemanticSegmentationDataset
-
-try:
-	from .single_dataset import (
-		TestSequenceDataset,
-		TestSingleDataset,
-		TrainDoubleDataset,
-		TrainSingleDataset,
-	)
-except Exception:  # optional dependency path (e.g. detectron2 not installed)
-	TestSequenceDataset = None
-	TestSingleDataset = None
-	TrainDoubleDataset = None
-	TrainSingleDataset = None
+from .vspw import SemanticSegmentationDataset
+from .lmdb_vspw import VSPWFrameLMDBDataset, VSPWSequenceLMDBDataset
 
 __all__ = [
 	"TrainSingleDataset",
@@ -27,4 +14,6 @@ __all__ = [
 	"SemanticSegmentationDataset",
 	"train_video_feature_collate_fn",
 	"test_video_feature_collate_fn",
+	"VSPWFrameLMDBDataset",
+	"VSPWSequenceLMDBDataset",
 ]

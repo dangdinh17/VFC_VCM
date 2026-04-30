@@ -15,19 +15,18 @@ import torch
 import torch.nn.functional as F
 from torch import device, nn
 from torch.utils.data import DataLoader
+from torchvision.models.segmentation import deeplabv3_resnet50, DeepLabV3_ResNet50_Weights
+from torchvision.models.segmentation.deeplabv3 import DeepLabHead
 from torchvision.models import ResNet50_Weights
-from torchvision.models.segmentation import (
-	deeplabv3_resnet50,
-	DeepLabV3_ResNet50_Weights,
-)
 from tqdm import tqdm
+import torchvision
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.utils.config import load_config
-from src.datasets.semantic_segmentation import SemanticSegmentationDataset
+from src.datasets import VSPWFrameLMDBDataset
 from src.evaluate import EvaluatorTorch
 
 def seed_everything(seed: int) -> None:
@@ -46,14 +45,20 @@ def make_model(num_classes: int, pretrained_backbone: bool = True) -> nn.Module:
 		weights_backbone=backbone_weights,
 		aux_loss=True,
 	)
+	# model.classifier = DeepLabHead(256, num_classes)
+	# model.aux_classifier = DeepLabHead(256, num_classes)
+	
+    
+    
 	# thay head cho số lớp mới
 	model.classifier[4] = nn.Conv2d(256, num_classes, kernel_size=1)
 	if model.aux_classifier is not None:
 		model.aux_classifier[4] = nn.Conv2d(256, num_classes, kernel_size=1)
+	
 
 	# Freeze backbone feature extractor (ResNet-50) for this training run.
-	for p in model.backbone.parameters():
-		p.requires_grad = False
+	# for p in model.backbone.parameters():
+	# 	p.requires_grad = False
 	return model
 
 @torch.no_grad()
@@ -115,6 +120,8 @@ def train_one_epoch(
 		# print("out min:", out["out"].min())
 		with torch.cuda.amp.autocast():
 			out = model(images)
+			
+			# print(out['out'].shape)
 			main_loss = F.cross_entropy(out["out"], targets, ignore_index=255)
 			aux_loss = F.cross_entropy(out["aux"], targets, ignore_index=255) if "aux" in out else 0.0
 
@@ -275,7 +282,7 @@ def main() -> None:
 		vspw_train = None
 		vspw_valid = None
 
-	train_ds = SemanticSegmentationDataset(
+	train_ds = VSPWFrameLMDBDataset(
 		split_dir=train_dir,
 		num_classes=num_classes,
 		vspw_split=vspw_train,
@@ -283,7 +290,7 @@ def main() -> None:
 		max_samples=max_train_samples,
 		seed=seed,
 	)
-	valid_ds = SemanticSegmentationDataset(
+	valid_ds = VSPWFrameLMDBDataset(
 		split_dir=valid_dir,
 		num_classes=num_classes,
 		vspw_split=vspw_valid,
@@ -367,6 +374,7 @@ def main() -> None:
 
 	for epoch in range(1, epochs + 1):
 		print(f"\nEpoch {epoch}/{epochs}")
+		model.train()
 		train_stats = train_one_epoch(
 			model=model,
 			loader=train_loader,
