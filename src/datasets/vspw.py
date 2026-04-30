@@ -301,7 +301,7 @@ class VSPWSequenceDataset(Dataset):
                 seq_items.append(
                     VSPWItem(img_path, mask_path, video_id, frame_id)
                 )
-            if max_samples and len(items) <= max_samples:
+            if max_samples and len(items) >= max_samples:
                 items.append(seq_items)
         return items
 
