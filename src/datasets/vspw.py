@@ -100,10 +100,16 @@ class VSPWDataset(Dataset):
 
             if not img_dir.exists() or not mask_dir.exists():
                 continue
-
-            for idx, mask_path in enumerate(sorted(mask_dir.glob("*.png"))):
+            all_masks = sorted([
+                m for m in mask_dir.glob("*.png") 
+                if not m.name.startswith("._")
+            ])
+            start_idx = self.rng.randint(0, len(all_masks) - self.seq_len)
+            indices = range(start_idx, start_idx + self.seq_len)
+            sampled_masks = [all_masks[i] for i in indices]
+            for idx, mask_path in enumerate(sampled_masks):
                 
-                if mask_path.name.startswith("._") or idx > self.seq_len - 1:
+                if mask_path.name.startswith("._"):
                     continue
 
                 frame_id = mask_path.stem
@@ -111,10 +117,10 @@ class VSPWDataset(Dataset):
 
                 if not img_path.exists():
                     continue
-
-                items.append(
-                    VSPWItem(img_path, mask_path, video_id, frame_id)
-                )
+                if max_samples and len(items) <= max_samples:
+                    items.append(
+                        VSPWItem(img_path, mask_path, video_id, frame_id)
+                    )
         return items
 
     # -------------------------
@@ -274,9 +280,16 @@ class VSPWSequenceDataset(Dataset):
             if not img_dir.exists() or not mask_dir.exists():
                 continue
 
-            for idx, mask_path in enumerate(sorted(mask_dir.glob("*.png"))):
+            all_masks = sorted([
+                m for m in mask_dir.glob("*.png") 
+                if not m.name.startswith("._")
+            ])
+            start_idx = self.rng.randint(0, len(all_masks) - self.seq_len)
+            indices = range(start_idx, start_idx + self.seq_len)
+            sampled_masks = [all_masks[i] for i in indices]
+            for idx, mask_path in enumerate(sampled_masks):
                 
-                if mask_path.name.startswith("._") or idx > self.seq_len - 1:
+                if mask_path.name.startswith("._"):
                     continue
 
                 frame_id = mask_path.stem
@@ -288,7 +301,8 @@ class VSPWSequenceDataset(Dataset):
                 seq_items.append(
                     VSPWItem(img_path, mask_path, video_id, frame_id)
                 )
-            items.append(seq_items)
+            if max_samples and len(items) <= max_samples:
+                items.append(seq_items)
         return items
 
     # -------------------------

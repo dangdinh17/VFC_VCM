@@ -120,7 +120,7 @@ logging:
   comet:
     enabled: true
     api_key: mkfmxVIjacb8h74qKO6NzPdPN
-    experiment_key: bc4feb6440c14842bc6d19dd3a5b6fce
+    experiment_key: null
     project_name: roi-vfc
     workspace: dangdinh17
 
