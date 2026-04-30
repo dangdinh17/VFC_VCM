@@ -1,7 +1,7 @@
 """Datasets package."""
 from .test_dataset import TestVideoFeatureDataset, test_video_feature_collate_fn
 from .train_dataset import TrainVideoFeatureDataset, train_video_feature_collate_fn
-from .vspw import SemanticSegmentationDataset
+from .vspw import VSPWDataset
 from .lmdb_vspw import VSPWFrameLMDBDataset, VSPWSequenceLMDBDataset
 
 __all__ = [
@@ -11,7 +11,7 @@ __all__ = [
 	"TestSequenceDataset",
 	"TrainVideoFeatureDataset",
 	"TestVideoFeatureDataset",
-	"SemanticSegmentationDataset",
+	"VSPWDataset",
 	"train_video_feature_collate_fn",
 	"test_video_feature_collate_fn",
 	"VSPWFrameLMDBDataset",

@@ -24,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.datasets import SemanticSegmentationDataset
+from src.datasets import VSPWDataset
 from src.models.backbone import FeatureExtraction
 from src.utils import AverageMeter, load_config
 
@@ -236,7 +236,7 @@ def main() -> None:
         spatial_transform = "resize"
         valid_crop_type = "center"
 
-    valid_ds = SemanticSegmentationDataset(
+    valid_ds = VSPWDataset(
         split_dir=valid_dir,
         image_size=(int(image_size[0]), int(image_size[1])),
         spatial_transform=spatial_transform,

@@ -21,7 +21,7 @@ class VSPWItem:
     frame_id: str
 
 
-class SemanticSegmentationDataset(Dataset):
+class VSPWDataset(Dataset):
     """Semantic segmentation dataset for VSPW only.
 
     Expected VSPW layout:

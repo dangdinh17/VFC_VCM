@@ -29,7 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.datasets import SemanticSegmentationDataset
+from src.datasets import VSPWDataset
 from src.models.backbone import FeatureExtraction, PerceptionExtraction
 from src.models.feature_space_transfer import FeatureSpaceTransfer
 from src.models.roi_vfc import ROI_VFC
@@ -384,7 +384,7 @@ def _build_dataloaders(cfg: Dict[str, Any], num_workers: int, train_bs: int, val
     #     seed=seed,
     #     num_classes=int(data_cfg.get("num_classes", 124)),
     # )
-    train_ds = SemanticSegmentationDataset(
+    train_ds = VSPWDataset(
         split_dir=train_dir,
         vspw_split=(str(data_cfg.get("train_split")) if "vspw" in str(data_root.name).lower() or "vspw" in str(data_root) else None),
         image_size=(int(image_size[0]), int(image_size[1])),
@@ -397,7 +397,7 @@ def _build_dataloaders(cfg: Dict[str, Any], num_workers: int, train_bs: int, val
         seed=seed,
         num_classes=int(data_cfg.get("num_classes", 124)),
     )
-    val_ds = SemanticSegmentationDataset(
+    val_ds = VSPWDataset(
         split_dir=valid_dir,
         vspw_split=(str(data_cfg.get("valid_split")) if "vspw" in str(data_root.name).lower() or "vspw" in str(data_root) else None),
         image_size=(int(image_size[0]), int(image_size[1])),

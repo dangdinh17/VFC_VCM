@@ -26,7 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.utils.config import load_config
-from src.datasets import VSPWFrameLMDBDataset
+from src.datasets import VSPWFrameLMDBDataset, VSPWDataset
 from src.evaluate import EvaluatorTorch
 
 def seed_everything(seed: int) -> None:
@@ -282,7 +282,7 @@ def main() -> None:
 		vspw_train = None
 		vspw_valid = None
 
-	train_ds = VSPWFrameLMDBDataset(
+	train_ds = VSPWDataset(
 		split_dir=train_dir,
 		num_classes=num_classes,
 		vspw_split=vspw_train,
@@ -290,7 +290,7 @@ def main() -> None:
 		max_samples=max_train_samples,
 		seed=seed,
 	)
-	valid_ds = VSPWFrameLMDBDataset(
+	valid_ds = VSPWDataset(
 		split_dir=valid_dir,
 		num_classes=num_classes,
 		vspw_split=vspw_valid,
