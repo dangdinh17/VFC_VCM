@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pyexpat import model
 import random
 import sys
 from dataclasses import dataclass
@@ -12,12 +13,13 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
 from torch import device, nn
-from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
+from torch.utils.data import DataLoader
 from torchvision.models import ResNet50_Weights
-from torchvision.models.segmentation import deeplabv3_resnet50
+from torchvision.models.segmentation import (
+	deeplabv3_resnet50,
+	DeepLabV3_ResNet50_Weights,
+)
 from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.utils.config import load_config
 from src.datasets.semantic_segmentation import SemanticSegmentationDataset
-
+from src.evaluate import EvaluatorTorch
 
 def seed_everything(seed: int) -> None:
 	random.seed(seed)
@@ -40,106 +42,53 @@ def make_model(num_classes: int, pretrained_backbone: bool = True) -> nn.Module:
 		ResNet50_Weights.IMAGENET1K_V2 if pretrained_backbone else None
 	)
 	model = deeplabv3_resnet50(
-		weights=None,
+		weights=DeepLabV3_ResNet50_Weights.COCO_WITH_VOC_LABELS_V1,
 		weights_backbone=backbone_weights,
-		num_classes=num_classes,
 		aux_loss=True,
 	)
+	# thay head cho số lớp mới
+	model.classifier[4] = nn.Conv2d(256, num_classes, kernel_size=1)
+	if model.aux_classifier is not None:
+		model.aux_classifier[4] = nn.Conv2d(256, num_classes, kernel_size=1)
+
 	# Freeze backbone feature extractor (ResNet-50) for this training run.
 	for p in model.backbone.parameters():
 		p.requires_grad = False
 	return model
 
 @torch.no_grad()
-def compute_miou(logits, targets, num_classes: int, ignore_index: int = 255):
-    """
-    logits: [B, C, H, W]
-    targets: [B, H, W]
-    """
-
-    preds = logits.argmax(dim=1)
-
-    ious = []
-
-    for cls in range(num_classes):
-        if cls == ignore_index:
-            continue
-
-        pred_i = (preds == cls)
-        target_i = (targets == cls)
-
-        # loại ignore pixel
-        valid = (targets != ignore_index)
-
-        pred_i = pred_i & valid
-        target_i = target_i & valid
-
-        inter = (pred_i & target_i).sum().item()
-        union = (pred_i | target_i).sum().item()
-
-        if union > 0:
-            ious.append(inter / union)
-
-    if len(ious) == 0:
-        return 0.0
-
-    return sum(ious) / len(ious)
-
-@torch.no_grad()
 def evaluate(model, loader, device, num_classes: int, ignore_index: int = 255):
-    model.eval()
+	model.eval()
+	total_loss = 0.0
+	evaluator = EvaluatorTorch(num_classes)
+	evaluator.reset()
 
-    total_loss = 0.0
-    pixel_correct = 0
-    pixel_total = 0
+	for batch in loader:
+		images = batch['image'].to(device)
+		targets = batch['mask'].to(device)
+		logits = model(images)["out"]
+		loss = F.cross_entropy(logits, targets, ignore_index=ignore_index)
+		total_loss += loss.item() * images.size(0)
+		preds = logits.argmax(dim=1)
+		evaluator.add_batch(targets.cpu(), preds.cpu(), ignore_index=ignore_index)
 
-    # confusion matrix (num_classes x num_classes)
-    hist = torch.zeros((num_classes, num_classes), dtype=torch.float64)
+	evaluator.beforeval()
+	inter = torch.diag(evaluator.confusion_matrix)
+	union = evaluator.confusion_matrix.sum(dim=1) + evaluator.confusion_matrix.sum(dim=0) - inter
+	per_class_iou = (inter / torch.clamp(union, min=1.0)).cpu().numpy()
+	valid_classes = (evaluator.confusion_matrix.sum(dim=1) > 0)
 
-    for batch in loader:
-        images = batch['image'].to(device)
-        targets = batch['mask'].to(device)
+	avg_loss = total_loss / len(loader.dataset)
 
-        logits = model(images)["out"]
-
-        loss = F.cross_entropy(logits, targets, ignore_index=ignore_index)
-        total_loss += loss.item() * images.size(0)
-
-        preds = logits.argmax(dim=1)
-
-        # ===== pixel accuracy =====
-        valid = targets != ignore_index
-        pixel_correct += (preds[valid] == targets[valid]).sum().item()
-        pixel_total += valid.sum().item()
-
-        # ===== update confusion matrix =====
-        preds = preds.cpu()
-        targets = targets.cpu()
-
-        mask = targets != ignore_index
-        preds = preds[mask]
-        targets = targets[mask]
-
-        k = num_classes * targets + preds
-        hist += torch.bincount(k, minlength=num_classes**2).reshape(num_classes, num_classes)
-
-    # ===== IoU =====
-    intersection = torch.diag(hist)
-    union = hist.sum(1) + hist.sum(0) - intersection
-
-    iou = intersection / (union + 1e-6)
-
-    miou = iou.mean().item()
-
-    avg_loss = total_loss / len(loader.dataset)
-    pixel_acc = pixel_correct / max(1, pixel_total)
-
-    return {
-        "loss": avg_loss,
-        "pixel_acc": pixel_acc,
-        "miou": miou,
-        "per_class_iou": iou.cpu().numpy()
-    }
+	return {
+		"loss": avg_loss,
+		"pixel_acc": evaluator.pixel_accuracy(),
+		"pixel_acc_class": evaluator.pixel_accuracy_class(),
+		"miou": evaluator.mean_iou(),
+		"fw_iou": evaluator.fw_iou(),
+		"per_class_iou": per_class_iou,
+		"num_valid_iou_classes": int(valid_classes.sum().item()),
+	}
 
 def train_one_epoch(
 	model: nn.Module,
@@ -157,23 +106,23 @@ def train_one_epoch(
 	for step, batch in enumerate(pbar, start=1):
 		images = batch["image"].to(device, non_blocking=True)
 		targets = batch["mask"].to(device, non_blocking=True)
-		out = model(images)
+  
+		# out = model(images)
 		# print("num_classes:", out["out"].shape[1])
 		# print("target max:", targets.max())
 		# print("target min:", targets.min())
 		# print("out max:", out["out"].max())
 		# print("out min:", out["out"].min())
-		main_loss = F.cross_entropy(out["out"], targets, ignore_index=255)
-		aux_loss = F.cross_entropy(out["aux"], targets, ignore_index=255) if "aux" in out else 0.0
+		with torch.cuda.amp.autocast():
+			out = model(images)
+			main_loss = F.cross_entropy(out["out"], targets, ignore_index=255)
+			aux_loss = F.cross_entropy(out["aux"], targets, ignore_index=255) if "aux" in out else 0.0
 
-		if isinstance(aux_loss, torch.Tensor):
-			loss = main_loss + aux_weight * aux_loss
-		else:
-			loss = main_loss
+			loss = main_loss + aux_weight * aux_loss if isinstance(aux_loss, torch.Tensor) else main_loss
 
-		optimizer.zero_grad(set_to_none=True)
-		loss.backward()
-		optimizer.step()
+		scaler.scale(loss).backward()
+		scaler.step(optimizer)
+		scaler.update()
 
   
 		
@@ -255,6 +204,9 @@ def _resolve_device(device_name: str | None) -> torch.device:
 
 
 def main() -> None:
+	torch.backends.cudnn.benchmark = True
+	torch.backends.cuda.matmul.allow_tf32 = True
+	torch.backends.cudnn.allow_tf32 = True
 	args = parse_args()
 	cfg = _read_config(args.config)
 
@@ -344,6 +296,8 @@ def main() -> None:
 		train_ds,
 		batch_size=batch_size,
 		shuffle=True,
+		persistent_workers=True,
+		prefetch_factor=4,
 		num_workers=num_workers,
 		pin_memory=(device.type == "cuda"),
 	)
@@ -352,13 +306,19 @@ def main() -> None:
 		batch_size=batch_size,
 		shuffle=False,
 		num_workers=num_workers,
+		persistent_workers=True,
+		prefetch_factor=4,
 		pin_memory=(device.type == "cuda"),
 	)
 
 	pretrained_backbone = bool(model_cfg.get("pretrained_backbone", True))
 	print(num_classes, pretrained_backbone)
-
+	
 	model = make_model(num_classes=num_classes, pretrained_backbone=pretrained_backbone).to(device)
+	
+	for name, p in model.named_parameters():
+		print(name, p.requires_grad)
+
 	optimizer = torch.optim.AdamW(
 		model.parameters(), lr=lr, weight_decay=weight_decay
 	)
@@ -370,6 +330,9 @@ def main() -> None:
 	)
 	print(f"Backbone: {backbone_name} | Model: DeepLabV3")
 	print(f"Using config: {args.config}")
+
+	global scaler
+	scaler = torch.cuda.amp.GradScaler()
 
 	best_iou = -1.0
 	history: List[Dict[str, float]] = []
@@ -420,6 +383,7 @@ def main() -> None:
 			"val_loss": val_stats["loss"],
 			"val_pixel_acc": val_stats["pixel_acc"],
 			"val_miou": val_stats["miou"],
+			"val_iou_valid_classes": val_stats.get("num_valid_iou_classes", 0),
 		}
 		history.append(row)
 
@@ -427,7 +391,8 @@ def main() -> None:
 			f"[epoch {epoch}] train_loss={row['train_loss']:.4f} "
 			f"val_loss={row['val_loss']:.4f} "
 			f"val_pixel_acc={row['val_pixel_acc']:.4f} "
-			f"val_miou={row['val_miou']:.4f}"
+			f"val_miou={row['val_miou']:.4f} "
+			f"val_iou_valid_classes={row['val_iou_valid_classes']}"
 		)
 
 		log_path = save_dir / "train_log.txt"

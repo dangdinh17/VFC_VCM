@@ -35,7 +35,7 @@ class SemanticSegmentationDataset(Dataset):
         self,
         split_dir: Path,
         num_classes: int = 124,
-        vspw_split: Optional[str] = None,
+        vspw_split: Optional[str] = 'train',
         image_size: Tuple[int, int] = (384, 640),
         spatial_transform: str = "resize",
         crop_type: str = "center",
@@ -57,13 +57,10 @@ class SemanticSegmentationDataset(Dataset):
         if self.crop_type not in ("random", "center"):
             raise ValueError("crop_type must be one of {'random', 'center'}")
 
-        self.root = self._resolve_vspw_root(Path(split_dir))
+        self.root = Path(split_dir)
         self.data_root = self.root / "data"
-        if not self.data_root.exists() or not self.data_root.is_dir():
-            raise FileNotFoundError(f"Missing VSPW data directory: {self.data_root}")
-
-        self.vspw_split = self._normalize_split_name(vspw_split or self._infer_split_from_path(Path(split_dir)))
-
+        self.split_file = self.root / f"{vspw_split}.txt"
+        
         self.seq_len = max(1, int(seq_len))
         self.seq_stride = self.seq_len if seq_stride is None else max(1, int(seq_stride))
 
@@ -82,45 +79,9 @@ class SemanticSegmentationDataset(Dataset):
         self.image_resize = transforms.Resize((h, w), interpolation=transforms.InterpolationMode.BILINEAR)
         self.mask_resize = transforms.Resize((h, w), interpolation=transforms.InterpolationMode.NEAREST)
 
-    def _resolve_vspw_root(self, split_dir: Path) -> Path:
-        # Accept either VSPW root itself or a child path like root/train, root/val, root/test.
-        if (split_dir / "data").exists():
-            return split_dir
-        if (split_dir.parent / "data").exists():
-            return split_dir.parent
-        raise FileNotFoundError(
-            f"Cannot locate VSPW root from split_dir={split_dir}. Expected '<root>/data' directory."
-        )
-
-    def _infer_split_from_path(self, split_dir: Path) -> Optional[str]:
-        name = split_dir.name.lower()
-        if name in {"train", "tr"}:
-            return "train"
-        if name in {"val", "valid", "validation"}:
-            return "val"
-        if name in {"test", "te"}:
-            return "test"
-        return None
-
-    def _normalize_split_name(self, split: Optional[str]) -> Optional[str]:
-        if split is None:
-            return None
-        s = str(split).strip().lower()
-        aliases = {"valid": "val", "validation": "val"}
-        return aliases.get(s, s)
 
     def _load_split_video_filter(self) -> Optional[Set[str]]:
-        if self.vspw_split is None:
-            return None
-
-        split_file = self.root / f"{self.vspw_split}.txt"
-        if not split_file.exists():
-            raise FileNotFoundError(
-                f"VSPW split file not found: {split_file}. "
-                "Available splits are typically train.txt, val.txt, test.txt."
-            )
-
-        with split_file.open("r", encoding="utf-8") as f:
+        with self.split_file.open("r", encoding="utf-8") as f:
             return {line.strip() for line in f if line.strip()}
 
     def _collect_items(self, max_samples: Optional[int], seed: int) -> List[VSPWItem]:
@@ -227,14 +188,13 @@ class SemanticSegmentationDataset(Dataset):
         image_raw = self.to_tensor(image)
         image_norm = self.norm_image_tf(image_raw.clone())
 
-        mask_np = np.array(mask, dtype=np.int64)
-        mask_np[(mask_np >= self.num_classes)] = 255
-        target = torch.from_numpy(mask_np)
+        mask = torch.as_tensor(np.array(mask), dtype=torch.long)
+        mask[(mask >= self.num_classes)] = 255
 
         return {
             "image": image_norm,
             "image_raw": image_raw,
-            "mask": target,
+            "mask": mask,
             "video_id": item.video_id,
             "frame_id": item.frame_id,
         }
@@ -254,3 +214,118 @@ class SemanticSegmentationDataset(Dataset):
             }
 
         return self._prepare_item(self.items[index])
+
+import lmdb
+import io
+from PIL import Image
+import torch
+import numpy as np
+
+class LMDBBase:
+    def __init__(self, lmdb_path: str):
+        self.env = lmdb.open(
+            lmdb_path,
+            readonly=True,
+            lock=True,
+            readahead=False,
+            meminit=False,
+        )
+
+    def _get(self, key: str) -> bytes:
+        with self.env.begin(write=False) as txn:
+            val = txn.get(key.encode())
+        return val
+
+from torch.utils.data import Dataset
+import torchvision.transforms.functional as TF
+
+class LMDBFrameDataset(LMDBBase, Dataset):
+    def __init__(self, lmdb_path, index_list, num_classes=124, image_size=(384, 640)):
+        LMDBBase.__init__(self, lmdb_path)
+        self.index = index_list  # list of (vid, frame)
+        self.num_classes = num_classes
+        self.size = image_size
+
+    def __len__(self):
+        return len(self.index)
+
+    def __getitem__(self, i):
+        vid, frame = self.index[i]
+
+        img_bytes = self._get(f"{vid}/{frame}_img")
+        mask_bytes = self._get(f"{vid}/{frame}_mask")
+
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        mask = Image.open(io.BytesIO(mask_bytes))
+
+        img = TF.resize(img, self.size)
+        mask = TF.resize(mask, self.size, interpolation=TF.InterpolationMode.NEAREST)
+
+        img = TF.to_tensor(img)
+        mask = torch.as_tensor(np.array(mask), dtype=torch.long)
+        mask[mask >= self.num_classes] = 255
+
+        return {
+            "image": img,
+            "mask": mask,
+            "frame_id": frame,
+            "video_id": vid,
+        }
+        
+class LMDBSequenceDataset(LMDBBase, Dataset):
+    def __init__(
+        self,
+        lmdb_path,
+        index_list,   # sorted list per video
+        video_map,    # {vid: [frame1, frame2,...]}
+        seq_len=5,
+        num_classes=124,
+        image_size=(384, 640),
+    ):
+        LMDBBase.__init__(self, lmdb_path)
+
+        self.video_map = video_map
+        self.seq_len = seq_len
+        self.num_classes = num_classes
+        self.size = image_size
+
+        self.samples = []
+
+        for vid, frames in video_map.items():
+            for i in range(len(frames) - seq_len + 1):
+                self.samples.append((vid, i))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, i):
+        vid, start = self.samples[i]
+        frames = self.video_map[vid][start:start + self.seq_len]
+
+        imgs = []
+        masks = []
+
+        for frame in frames:
+            img_bytes = self._get(f"{vid}/{frame}_img")
+            mask_bytes = self._get(f"{vid}/{frame}_mask")
+
+            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            mask = Image.open(io.BytesIO(mask_bytes))
+
+            img = TF.resize(img, self.size)
+            mask = TF.resize(mask, self.size, TF.InterpolationMode.NEAREST)
+
+            imgs.append(TF.to_tensor(img))
+            masks.append(torch.as_tensor(np.array(mask), dtype=torch.long))
+
+        imgs = torch.stack(imgs)
+        masks = torch.stack(masks)
+
+        masks[masks >= self.num_classes] = 255
+
+        return {
+            "image": imgs,   # [T, C, H, W]
+            "mask": masks,   # [T, H, W]
+            "video_id": vid,
+            "frame_id": frames,
+        }
