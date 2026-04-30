@@ -283,6 +283,7 @@ def main() -> None:
 		vspw_valid = None
 
 	train_ds = VSPWDataset(
+        root=data_root,
 		split_dir=train_dir,
 		num_classes=num_classes,
 		image_size=(height, width),
@@ -290,6 +291,7 @@ def main() -> None:
 		seed=seed,
 	)
 	valid_ds = VSPWDataset(
+        root=data_root,
 		split_dir=valid_dir,
 		num_classes=num_classes,
 		image_size=(height, width),

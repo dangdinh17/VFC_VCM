@@ -326,8 +326,7 @@ class VSPWDataset(Dataset):
             mask = TF.hflip(mask)
 
         # Random color jitter (ONLY image)
-        if self.rng.random() < 0.8:
-            image = self.color_jitter(image)
+
 
         # Random resize jitter (slight scale)
         if self.rng.random() < 0.5:
