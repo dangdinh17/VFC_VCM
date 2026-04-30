@@ -270,21 +270,9 @@ def main() -> None:
 		save_dir = PROJECT_ROOT / save_dir
 	save_dir.mkdir(parents=True, exist_ok=True)
 
-	# VSPW layout uses data_root/data/<video> with split lists at data_root/*.txt
-	if (data_root / "data").exists():
-		train_dir = data_root
-		valid_dir = data_root
-		vspw_train = train_split
-		vspw_valid = valid_split
-	else:
-		train_dir = data_root / train_split
-		valid_dir = data_root / valid_split
-		vspw_train = None
-		vspw_valid = None
-
 	train_ds = VSPWDataset(
         root=data_root,
-		split_dir=train_dir,
+		split_dir=train_split,
 		num_classes=num_classes,
 		image_size=(height, width),
 		max_samples=max_train_samples,
@@ -292,7 +280,7 @@ def main() -> None:
 	)
 	valid_ds = VSPWDataset(
         root=data_root,
-		split_dir=valid_dir,
+		split_dir=valid_split,
 		num_classes=num_classes,
 		image_size=(height, width),
 		max_samples=max_valid_samples,

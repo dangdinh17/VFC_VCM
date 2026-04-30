@@ -45,6 +45,7 @@ class VSPWDataset(Dataset):
         self.num_classes = num_classes
         self.image_size = image_size
         self.augment = augment
+        self.seq_len = max(1, int(seq_len))
 
         self.rng = random.Random(seed)
 
@@ -68,7 +69,6 @@ class VSPWDataset(Dataset):
             saturation=0.2,
             hue=0.05,
         )
-        self.seq_len = max(1, int(seq_len))
 
     # -------------------------
     # split file
@@ -150,6 +150,23 @@ class VSPWDataset(Dataset):
             mask = TF.center_crop(mask, self.image_size)
         return image, mask
     
+    def _smart_resize(self, image, mask):
+        w, h = image.size
+        target_h, target_w = self.image_size
+
+        # Kiểm tra xem ảnh đã đủ lớn chưa
+        if h < target_h or w < target_w:
+            # Tính toán tỷ lệ scale để giữ nguyên aspect ratio
+            # Scale dựa trên chiều nào thiếu hụt nhiều hơn
+            scale = max(target_h / h, target_w / w)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            
+            # Resize ảnh (Bilinear) và mask (Nearest)
+            image = TF.resize(image, (new_h, new_w), interpolation=transforms.InterpolationMode.BILINEAR)
+            mask = TF.resize(mask, (new_h, new_w), interpolation=transforms.InterpolationMode.NEAREST)
+            
+        return image, mask
     # -------------------------
     # main loader
     # -------------------------
@@ -160,6 +177,9 @@ class VSPWDataset(Dataset):
         mask = Image.open(item.mask_path)
 
         # resize first (stable baseline)
+        image, mask = self._smart_resize(image, mask)
+
+        # crop
         image, mask = self._crop(image, mask)
 
         # augmentation
@@ -206,6 +226,7 @@ class VSPWSequenceDataset(Dataset):
         self.augment = augment
 
         self.rng = random.Random(seed)
+        self.seq_len = max(1, int(seq_len))
 
         self.items = self._collect_items(max_samples, seed)
         if not self.items:
@@ -220,7 +241,6 @@ class VSPWSequenceDataset(Dataset):
             image_size, interpolation=transforms.InterpolationMode.NEAREST
         )
 
-        self.seq_len = max(1, int(seq_len))
 
     # -------------------------
     # split file
@@ -300,6 +320,23 @@ class VSPWSequenceDataset(Dataset):
             masks = [TF.center_crop(m, self.image_size) for m in masks]
 
         return images, masks
+    def _smart_resize(self, images, masks):
+        w, h = images[0].size
+        target_h, target_w = self.image_size
+
+        # Kiểm tra xem ảnh đã đủ lớn chưa
+        if h < target_h or w < target_w:
+            # Tính toán tỷ lệ scale để giữ nguyên aspect ratio
+            # Scale dựa trên chiều nào thiếu hụt nhiều hơn
+            scale = max(target_h / h, target_w / w)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            
+            # Resize ảnh (Bilinear) và mask (Nearest)
+            images = [TF.resize(img, (new_h, new_w), interpolation=transforms.InterpolationMode.BILINEAR) for img in images]
+            masks = [TF.resize(m, (new_h, new_w), interpolation=transforms.InterpolationMode.NEAREST) for m in masks]
+            
+        return images, masks
     # -------------------------
     # main loader
     # -------------------------
@@ -318,6 +355,8 @@ class VSPWSequenceDataset(Dataset):
             masks.append(mask)
             frame_ids.append(item.frame_id)
         
+        images, masks = self._smart_resize(images, masks)
+        # crop
         images, masks = self._crop_sequence(images, masks)
 
         # ---- augment (sync) ----
