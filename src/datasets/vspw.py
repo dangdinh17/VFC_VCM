@@ -34,7 +34,7 @@ class VSPWDataset(Dataset):
         max_samples: Optional[int] = None,
         seed: int = 42,
         augment: bool = True,
-        seq_len: int = 8,
+        seq_len: int = 1,
     ):
         super().__init__()
 
@@ -285,24 +285,25 @@ class VSPWSequenceDataset(Dataset):
                 m for m in mask_dir.glob("*.png") 
                 if not m.name.startswith("._")
             ])
-            start_idx = self.rng.randint(0, len(all_masks) - self.seq_len)
-            indices = range(start_idx, start_idx + self.seq_len)
-            sampled_masks = [all_masks[i] for i in indices]
-            for idx, mask_path in enumerate(sampled_masks):
-                
-                if mask_path.name.startswith("._"):
-                    continue
-
-                frame_id = mask_path.stem
-                img_path = img_dir / f"{frame_id}.jpg"
-
-                if not img_path.exists():
-                    continue
-
-                seq_items.append(
-                    VSPWItem(img_path, mask_path, video_id, frame_id)
-                )
-            items.append(seq_items)
+            num_total_frames = len(all_masks)
+            
+            for i in range(0, num_total_frames, self.seq_len):
+                # Kiểm tra nếu còn đủ seq_len frame thì mới lấy
+                if i + self.seq_len <= num_total_frames:
+                    indices = range(i, i + self.seq_len)
+                    
+                    sampled_masks = [all_masks[idx] for idx in indices]
+                    sampled_images = []
+                    
+                    for mask_path in sampled_masks:
+                        frame_id = mask_path.stem
+                        img_path = img_dir / f"{mask_path.stem}.jpg"
+                        if not img_path.exists():
+                            break
+                        seq_items.append(
+                            VSPWItem(img_path, mask_path, video_id, frame_id)
+                        )
+                    items.append(seq_items)
             if max_samples and len(items) >= max_samples:
                     return items
         return items
