@@ -328,14 +328,14 @@ class VSPWDataset(Dataset):
         # Random color jitter (ONLY image)
 
 
-        # Random resize jitter (slight scale)
-        if self.rng.random() < 0.5:
-            scale = self.rng.uniform(0.8, 1.2)
-            h, w = image.size[1], image.size[0]
-            new_h, new_w = int(h * scale), int(w * scale)
+        # # Random resize jitter (slight scale)
+        # if self.rng.random() < 0.5:
+        #     scale = self.rng.uniform(0.8, 1.2)
+        #     h, w = image.size[1], image.size[0]
+        #     new_h, new_w = int(h * scale), int(w * scale)
 
-            image = TF.resize(image, [new_h, new_w])
-            mask = TF.resize(mask, [new_h, new_w], interpolation=Image.NEAREST)
+        #     image = TF.resize(image, [new_h, new_w])
+        #     mask = TF.resize(mask, [new_h, new_w], interpolation=Image.NEAREST)
 
         # Random crop back to target size
         if image.size[0] >= self.image_size[1] and image.size[1] >= self.image_size[0]:
