@@ -225,7 +225,7 @@ class VSPWDataset(Dataset):
     def __init__(
         self,
         root: Path,
-        split: str = "train",
+        split_dir: str = "train",
         num_classes: int = 124,
         image_size: Tuple[int, int] = (384, 640),
         max_samples: Optional[int] = None,
@@ -236,7 +236,7 @@ class VSPWDataset(Dataset):
 
         self.root = Path(root)
         self.data_root = self.root / "data"
-        self.split_file = self.root / f"{split}.txt"
+        self.split_file = self.root / f"{split_dir}.txt"
 
         self.num_classes = num_classes
         self.image_size = image_size
