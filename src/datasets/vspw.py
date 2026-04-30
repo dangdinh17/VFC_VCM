@@ -117,10 +117,11 @@ class VSPWDataset(Dataset):
 
                 if not img_path.exists():
                     continue
-                if max_samples and len(items) <= max_samples:
-                    items.append(
+                items.append(
                         VSPWItem(img_path, mask_path, video_id, frame_id)
                     )
+                if max_samples and len(items) >= max_samples:
+                    return items
         return items
 
     # -------------------------
@@ -301,8 +302,9 @@ class VSPWSequenceDataset(Dataset):
                 seq_items.append(
                     VSPWItem(img_path, mask_path, video_id, frame_id)
                 )
+            items.append(seq_items)
             if max_samples and len(items) >= max_samples:
-                items.append(seq_items)
+                    return items
         return items
 
     # -------------------------
