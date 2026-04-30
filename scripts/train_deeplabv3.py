@@ -285,7 +285,6 @@ def main() -> None:
 	train_ds = VSPWDataset(
 		split_dir=train_dir,
 		num_classes=num_classes,
-		vspw_split=vspw_train,
 		image_size=(height, width),
 		max_samples=max_train_samples,
 		seed=seed,
@@ -293,7 +292,6 @@ def main() -> None:
 	valid_ds = VSPWDataset(
 		split_dir=valid_dir,
 		num_classes=num_classes,
-		vspw_split=vspw_valid,
 		image_size=(height, width),
 		max_samples=max_valid_samples,
 		seed=seed,
