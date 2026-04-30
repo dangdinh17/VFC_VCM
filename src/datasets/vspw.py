@@ -230,7 +230,7 @@ class VSPWSequenceDataset(Dataset):
         self.root = Path(root)
         self.data_root = self.root / "data"
         self.split_file = self.root / f"{split_dir}.txt"
-
+        self.split_dir = split_dir
         self.num_classes = num_classes
         self.image_size = image_size
         self.augment = augment
@@ -395,8 +395,8 @@ class VSPWSequenceDataset(Dataset):
         masks[masks >= self.num_classes] = 255
 
         return {
-            "image": image,
-            "mask": mask,
+            "image": images,
+            "mask": masks,
             "video_id": video_id,
             "frame_id": frame_ids,
         }
