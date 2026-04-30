@@ -14,7 +14,7 @@ data:
   data_root: data/VSPW
   train_split: train
   valid_split: val
-  image_size: [384, 640]  # [height, width]
+  image_size: [512, 512]  # [height, width]
   max_train_samples: null
   max_valid_samples: 1000
 
