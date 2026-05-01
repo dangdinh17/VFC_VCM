@@ -61,7 +61,10 @@ class VSPWDataset(Dataset):
         self.resize_mask = transforms.Resize(
             image_size, interpolation=transforms.InterpolationMode.NEAREST
         )
-
+        self.normalize = transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+        )
         # color jitter (ONLY image)
         self.color_jitter = transforms.ColorJitter(
             brightness=0.2,
@@ -141,8 +144,8 @@ class VSPWDataset(Dataset):
             mask = TF.vflip(mask)
         if self.rng.random() < 0.5:
             angle = self.rng.uniform(-10, 10)
-            image = TF.rotate(image, angle)
-            mask = TF.rotate(mask, angle)
+            image = TF.rotate(image, angle, interpolation=transforms.InterpolationMode.BILINEAR)
+            mask = TF.rotate(mask, angle, interpolation=transforms.InterpolationMode.NEAREST)
 
         return image, mask
 
@@ -196,7 +199,7 @@ class VSPWDataset(Dataset):
         if self.augment and self.split_dir == "train":
             image, mask = self._augment(image, mask)
 
-        image = self.to_tensor(image)
+        image = self.normalize(self.to_tensor(image))
         mask = torch.as_tensor(np.array(mask), dtype=torch.long)
 
         # invalid labels
@@ -250,7 +253,10 @@ class VSPWSequenceDataset(Dataset):
         self.resize_mask = transforms.Resize(
             image_size, interpolation=transforms.InterpolationMode.NEAREST
         )
-
+        self.normalize = transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+        )
 
     # -------------------------
     # split file
@@ -323,8 +329,8 @@ class VSPWSequenceDataset(Dataset):
             masks = [TF.vflip(m) for m in masks]
         if self.rng.random() < 0.5:
             angle = self.rng.uniform(-10, 10)
-            images = [TF.rotate(img, angle) for img in images]
-            masks = [TF.rotate(m, angle) for m in masks]
+            images = [TF.rotate(img, angle, interpolation=transforms.InterpolationMode.BILINEAR) for img in images]
+            masks = [TF.rotate(m, angle, interpolation=transforms.InterpolationMode.NEAREST) for m in masks]
         return images, masks
 
     def _crop_sequence(self, images, masks):
@@ -383,7 +389,7 @@ class VSPWSequenceDataset(Dataset):
             images, masks = self._augment_sequence(images, masks)
 
         # ---- to tensor ----
-        images = [self.to_tensor(img) for img in images]
+        images = [self.normalize(self.to_tensor(img)) for img in images]
         masks = [torch.as_tensor(np.array(m), dtype=torch.long) for m in masks]
 
         # ---- stack ----
