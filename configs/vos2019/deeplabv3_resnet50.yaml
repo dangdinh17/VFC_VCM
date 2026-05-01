@@ -22,6 +22,8 @@ training:
   epochs: 5
   batch_size: 16
   lr: 1.0e-4
+  lr_scheduler: cosine
+  min_lr: 1.0e-6
   weight_decay: 1.0e-4
   num_workers: 4
   print_freq: 100

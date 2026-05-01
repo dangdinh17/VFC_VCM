@@ -6,9 +6,9 @@ seed: 42
 model:
   arch: deeplabv3_resnet50
   backbone: resnet50
-  num_classes: 124
+  num_classes: 125
   pretrained_backbone: true
-  aux_weight: 0.4
+  aux_weight: 0.2
 
 data:
   data_root: data/VSPW
@@ -17,15 +17,27 @@ data:
   image_size: [384, 640]  # [height, width]
   max_train_samples: null
   max_valid_samples: 2000
+  seq_len_train: 32
+  seq_len_valid: 8
 
 training:
   epochs: 50
   batch_size: 16
-  lr: 1.0e-4
-  weight_decay: 1.0e-4
+  backbone_lr: 1.0e-5
+  classifier_lr: 1.0e-3
+  lr_scheduler: cosine
+  min_lr: 1.0e-6
+  weight_decay: 1.0e-2
   num_workers: 8
   print_freq: 100
   device: auto
+  # null: no class weighting; auto: median-frequency weights from train masks;
+  # or provide a list of 125 manual weights.
+  class_weights: auto
+  class_weight_power: 0.5
+  class_weight_min: 0.1
+  class_weight_max: 5.0
+  class_weights_cache: class_weights.pt
 
 output:
   save_dir: outputs/deeplabv3_vspw_resnet50

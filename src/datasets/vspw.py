@@ -104,17 +104,18 @@ class VSPWDataset(Dataset):
             if not img_dir.exists() or not mask_dir.exists():
                 continue
             all_masks = sorted([
-                m for m in mask_dir.glob("*.png") 
+                m for m in mask_dir.glob("*.png")
                 if not m.name.startswith("._")
             ])
-            if self.seq_len > 1:
-                start_idx = self.rng.randint(0, len(all_masks) - self.seq_len)
-                indices = range(start_idx, start_idx + self.seq_len)
+            seq_len = min(self.seq_len, len(all_masks))
+            if seq_len > 1:
+                start_idx = self.rng.randint(0, len(all_masks) - seq_len)
+                indices = range(start_idx, start_idx + seq_len)
                 sampled_masks = [all_masks[i] for i in indices]
             else:
                 sampled_masks = all_masks
             for idx, mask_path in enumerate(sampled_masks):
-                
+
                 if mask_path.name.startswith("._"):
                     continue
 
@@ -138,7 +139,7 @@ class VSPWDataset(Dataset):
         if self.rng.random() < 0.5:
             image = TF.hflip(image)
             mask = TF.hflip(mask)
-        
+
         if self.rng.random() < 0.5:
             image = TF.vflip(image)
             mask = TF.vflip(mask)
@@ -146,6 +147,7 @@ class VSPWDataset(Dataset):
             angle = self.rng.uniform(-10, 10)
             image = TF.rotate(image, angle, interpolation=transforms.InterpolationMode.BILINEAR)
             mask = TF.rotate(mask, angle, interpolation=transforms.InterpolationMode.NEAREST)
+        image = self.color_jitter(image)
 
         return image, mask
 
@@ -162,7 +164,7 @@ class VSPWDataset(Dataset):
             image = TF.center_crop(image, self.image_size)
             mask = TF.center_crop(mask, self.image_size)
         return image, mask
-    
+
     def _smart_resize(self, image, mask):
         w, h = image.size
         target_h, target_w = self.image_size
@@ -174,11 +176,11 @@ class VSPWDataset(Dataset):
             scale = max(target_h / h, target_w / w)
             new_w = int(w * scale)
             new_h = int(h * scale)
-            
+
             # Resize ảnh (Bilinear) và mask (Nearest)
             image = TF.resize(image, (new_h, new_w), interpolation=transforms.InterpolationMode.BILINEAR)
             mask = TF.resize(mask, (new_h, new_w), interpolation=transforms.InterpolationMode.NEAREST)
-            
+
         return image, mask
     # -------------------------
     # main loader
@@ -214,7 +216,7 @@ class VSPWDataset(Dataset):
 
     def __len__(self):
         return len(self.items)
-    
+
 
 class VSPWSequenceDataset(Dataset):
     def __init__(
@@ -257,6 +259,12 @@ class VSPWSequenceDataset(Dataset):
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225],
         )
+        self.color_jitter = transforms.ColorJitter(
+            brightness=0.2,
+            contrast=0.2,
+            saturation=0.2,
+            hue=0.05,
+        )
 
     # -------------------------
     # split file
@@ -276,7 +284,7 @@ class VSPWSequenceDataset(Dataset):
         items: List[List[VSPWItem]] = []
         seq_items: List[VSPWItem] = []
         for video_dir in sorted(self.data_root.iterdir()):
-            
+
             if not video_dir.is_dir():
                 continue
 
@@ -291,16 +299,16 @@ class VSPWSequenceDataset(Dataset):
                 continue
 
             all_masks = sorted([
-                m for m in mask_dir.glob("*.png") 
+                m for m in mask_dir.glob("*.png")
                 if not m.name.startswith("._")
             ])
             num_total_frames = len(all_masks)
-            
+
             for i in range(0, num_total_frames, self.seq_len):
                 # Kiểm tra nếu còn đủ seq_len frame thì mới lấy
                 if i + self.seq_len <= num_total_frames:
                     indices = range(i, i + self.seq_len)
-                    
+
                     sampled_masks = [all_masks[idx] for idx in indices]
                     seq_items = []
                     for mask_path in sampled_masks:
@@ -331,6 +339,7 @@ class VSPWSequenceDataset(Dataset):
             angle = self.rng.uniform(-10, 10)
             images = [TF.rotate(img, angle, interpolation=transforms.InterpolationMode.BILINEAR) for img in images]
             masks = [TF.rotate(m, angle, interpolation=transforms.InterpolationMode.NEAREST) for m in masks]
+        images = [self.color_jitter(img) for img in images]
         return images, masks
 
     def _crop_sequence(self, images, masks):
@@ -356,11 +365,11 @@ class VSPWSequenceDataset(Dataset):
             scale = max(target_h / h, target_w / w)
             new_w = int(w * scale)
             new_h = int(h * scale)
-            
+
             # Resize ảnh (Bilinear) và mask (Nearest)
             images = [TF.resize(img, (new_h, new_w), interpolation=transforms.InterpolationMode.BILINEAR) for img in images]
             masks = [TF.resize(m, (new_h, new_w), interpolation=transforms.InterpolationMode.NEAREST) for m in masks]
-            
+
         return images, masks
     # -------------------------
     # main loader
@@ -379,7 +388,7 @@ class VSPWSequenceDataset(Dataset):
             images.append(image)
             masks.append(mask)
             frame_ids.append(item.frame_id)
-        
+
         images, masks = self._smart_resize(images, masks)
         # crop
         images, masks = self._crop_sequence(images, masks)

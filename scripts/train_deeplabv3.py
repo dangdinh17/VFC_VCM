@@ -14,6 +14,7 @@ from unittest import loader
 import numpy as np
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from torch import device, nn
 from torch.utils.data import DataLoader
 from torchvision.models.segmentation import deeplabv3_resnet50, DeepLabV3_ResNet50_Weights
@@ -48,19 +49,105 @@ def make_model(num_classes: int, pretrained_backbone: bool = True) -> nn.Module:
 	)
 	# model.classifier = DeepLabHead(256, num_classes)
 	# model.aux_classifier = DeepLabHead(256, num_classes)
-	
-    
-    
+
+
+
 	# thay head cho số lớp mới
 	model.classifier[4] = nn.Conv2d(256, num_classes, kernel_size=1)
 	if model.aux_classifier is not None:
 		model.aux_classifier[4] = nn.Conv2d(256, num_classes, kernel_size=1)
-	
+
 
 	# Freeze backbone feature extractor (ResNet-50) for this training run.
 	# for p in model.backbone.parameters():
 	# 	p.requires_grad = False
 	return model
+
+
+def _compute_auto_class_weights(
+	dataset: VSPWDataset,
+	num_classes: int,
+	ignore_index: int = 255,
+	power: float = 0.5,
+	min_weight: float = 0.1,
+	max_weight: float = 10.0,
+) -> torch.Tensor:
+	counts = torch.zeros(num_classes, dtype=torch.float64)
+	for item in tqdm(dataset.items, desc="Counting class pixels"):
+		with Image.open(item.mask_path) as mask_img:
+			mask = torch.as_tensor(np.array(mask_img), dtype=torch.long)
+		valid = (mask >= 0) & (mask < num_classes) & (mask != ignore_index)
+		if valid.any():
+			counts += torch.bincount(mask[valid].reshape(-1), minlength=num_classes).double()
+
+	present = counts > 0
+	if not present.any():
+		raise RuntimeError("Cannot compute class weights: no valid class pixels found.")
+
+	freq = counts[present] / counts[present].sum().clamp_min(1.0)
+	median_freq = freq.median()
+	weights = torch.zeros(num_classes, dtype=torch.float32)
+	weights[present] = (median_freq / freq).pow(power).float()
+	weights[present] = weights[present].clamp(min=min_weight, max=max_weight)
+	weights[present] /= weights[present].mean().clamp_min(1e-12)
+	return weights
+
+
+def _resolve_class_weights(
+	class_weights_cfg: Any,
+	dataset: VSPWDataset,
+	num_classes: int,
+	device: torch.device,
+	ignore_index: int = 255,
+	power: float = 0.5,
+	min_weight: float = 0.1,
+	max_weight: float = 10.0,
+	cache_path: Path | None = None,
+) -> torch.Tensor | None:
+	if class_weights_cfg in (None, False, "none", "null"):
+		return None
+	if isinstance(class_weights_cfg, str) and class_weights_cfg.lower() == "auto":
+		if cache_path is not None and cache_path.exists():
+			weights = torch.load(cache_path, map_location="cpu")
+			weights = torch.as_tensor(weights, dtype=torch.float32)
+			if weights.numel() != num_classes:
+				raise ValueError(
+					f"Cached class weights at {cache_path} have {weights.numel()} values, "
+					f"expected {num_classes}."
+				)
+			print(f"Loaded class weights from {cache_path}")
+		else:
+			weights = _compute_auto_class_weights(
+				dataset=dataset,
+				num_classes=num_classes,
+				ignore_index=ignore_index,
+				power=power,
+				min_weight=min_weight,
+				max_weight=max_weight,
+			)
+			if cache_path is not None:
+				cache_path.parent.mkdir(parents=True, exist_ok=True)
+				torch.save(weights.cpu(), cache_path)
+				print(f"Saved class weights to {cache_path}")
+	elif isinstance(class_weights_cfg, (list, tuple)):
+		if len(class_weights_cfg) != num_classes:
+			raise ValueError(
+				f"training.class_weights must have {num_classes} values, "
+				f"got {len(class_weights_cfg)}"
+			)
+		weights = torch.tensor(class_weights_cfg, dtype=torch.float32)
+	else:
+		raise ValueError(
+			"training.class_weights must be null, 'auto', or a list of per-class weights"
+		)
+
+	print(
+		"Class weights enabled | "
+		f"min={weights[weights > 0].min().item():.4f} "
+		f"max={weights.max().item():.4f} "
+		f"mean_present={weights[weights > 0].mean().item():.4f}"
+	)
+	return weights.to(device)
 
 @torch.no_grad()
 def evaluate(model, loader, device, num_classes: int, ignore_index: int = 255):
@@ -69,7 +156,7 @@ def evaluate(model, loader, device, num_classes: int, ignore_index: int = 255):
 	evaluator = EvaluatorTorch(num_classes)
 	evaluator.reset()
 	pbar = tqdm(loader)
-	for batch in pbar:    
+	for batch in pbar:
 		images = batch['image'].to(device)
 		targets = batch['mask'].to(device)
 		logits = model(images)["out"]
@@ -79,7 +166,7 @@ def evaluate(model, loader, device, num_classes: int, ignore_index: int = 255):
 		evaluator.add_batch(targets.cpu(), preds.cpu(), ignore_index=ignore_index)
 
 	evaluator.beforeval()
-	gt_pixels_per_class = evaluator.confusion_matrix.sum(dim=1) 
+	gt_pixels_per_class = evaluator.confusion_matrix.sum(dim=1)
 	# print("Classes xuất hiện:", (gt_pixels_per_class > 0).sum())
 	# for i, v in enumerate(gt_pixels_per_class):
 	# 	if v > 0:
@@ -90,6 +177,7 @@ def evaluate(model, loader, device, num_classes: int, ignore_index: int = 255):
 	valid_classes = (evaluator.confusion_matrix.sum(dim=1) > 0)
 
 	avg_loss = total_loss / len(loader.dataset)
+
 
 	return {
 		"loss": avg_loss,
@@ -108,6 +196,8 @@ def train_one_epoch(
 	device: torch.device,
 	aux_weight: float,
 	print_freq: int,
+	class_weights: torch.Tensor | None = None,
+	scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
 ) -> Dict[str, float]:
 	model.train()
 	total_loss = 0.0
@@ -117,7 +207,8 @@ def train_one_epoch(
 	for step, batch in enumerate(pbar, start=1):
 		images = batch["image"].to(device, non_blocking=True)
 		targets = batch["mask"].to(device, non_blocking=True)
-  
+		optimizer.zero_grad(set_to_none=True)
+
 		# out = model(images)
 		# print("num_classes:", out["out"].shape[1])
 		# print("target max:", targets.max())
@@ -126,19 +217,27 @@ def train_one_epoch(
 		# print("out min:", out["out"].min())
 		with torch.cuda.amp.autocast():
 			out = model(images)
-			
+
 			# print(out['out'].shape)
-			main_loss = F.cross_entropy(out["out"], targets, ignore_index=255)
-			aux_loss = F.cross_entropy(out["aux"], targets, ignore_index=255) if "aux" in out else 0.0
+			main_loss = F.cross_entropy(
+				out["out"], targets, weight=class_weights, ignore_index=255
+			)
+			aux_loss = (
+				F.cross_entropy(out["aux"], targets, weight=class_weights, ignore_index=255)
+				if "aux" in out
+				else 0.0
+			)
 
 			loss = main_loss + aux_weight * aux_loss if isinstance(aux_loss, torch.Tensor) else main_loss
 
 		scaler.scale(loss).backward()
 		scaler.step(optimizer)
 		scaler.update()
+		if scheduler is not None:
+			scheduler.step()
 
-  
-		
+
+
 		total_loss += float(loss.item()) * images.size(0)
 
 		# ✅ thêm dòng này
@@ -146,7 +245,7 @@ def train_one_epoch(
 			loss=f"{loss.item():.4f}",
 			main=f"{main_loss.item():.4f}",
 		)
-		
+
 		# if step % print_freq == 0 or step == len(loader):
 		# 	print(
 		# 		f"[train] step {step:04d}/{len(loader):04d} "
@@ -174,6 +273,21 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--epochs", type=int, default=None)
 	parser.add_argument("--batch-size", type=int, default=None)
 	parser.add_argument("--lr", type=float, default=None)
+	parser.add_argument("--backbone-lr", type=float, default=None)
+	parser.add_argument("--classifier-lr", type=float, default=None)
+	parser.add_argument(
+		"--lr-scheduler",
+		type=str,
+		default=None,
+		choices=("none", "cosine"),
+		help="Learning rate scheduler to use",
+	)
+	parser.add_argument(
+		"--min-lr",
+		type=float,
+		default=None,
+		help="Minimum learning rate for cosine annealing",
+	)
 	parser.add_argument("--weight-decay", type=float, default=None)
 	parser.add_argument("--num-workers", type=int, default=None)
 	parser.add_argument("--height", type=int, default=None)
@@ -246,7 +360,20 @@ def main() -> None:
 
 	epochs = int(_resolve_setting(args.epochs, train_cfg.get("epochs"), 5))
 	batch_size = int(_resolve_setting(args.batch_size, train_cfg.get("batch_size"), 2))
-	lr = float(_resolve_setting(args.lr, train_cfg.get("lr"), 1e-4))
+	classifier_lr = float(
+		_resolve_setting(
+			args.classifier_lr,
+			_resolve_setting(args.lr, train_cfg.get("classifier_lr"), train_cfg.get("lr")),
+			1e-3,
+		)
+	)
+	backbone_lr = float(
+		_resolve_setting(args.backbone_lr, train_cfg.get("backbone_lr"), 1e-5)
+	)
+	lr_scheduler_name = str(
+		_resolve_setting(args.lr_scheduler, train_cfg.get("lr_scheduler"), "cosine")
+	).lower()
+	min_lr = float(_resolve_setting(args.min_lr, train_cfg.get("min_lr"), 1e-6))
 	weight_decay = float(
 		_resolve_setting(args.weight_decay, train_cfg.get("weight_decay"), 1e-4)
 	)
@@ -256,6 +383,11 @@ def main() -> None:
 	print_freq = int(_resolve_setting(args.print_freq, train_cfg.get("print_freq"), 100))
 	aux_weight = float(_resolve_setting(args.aux_weight, model_cfg.get("aux_weight"), 0.4))
 	num_classes = int(model_cfg.get("num_classes", 2))
+	class_weights_cfg = train_cfg.get("class_weights", None)
+	class_weight_power = float(train_cfg.get("class_weight_power", 0.5))
+	class_weight_min = float(train_cfg.get("class_weight_min", 0.1))
+	class_weight_max = float(train_cfg.get("class_weight_max", 10.0))
+	class_weights_cache_cfg = train_cfg.get("class_weights_cache", "class_weights.pt")
 	max_train_samples = _resolve_setting(
 		args.max_train_samples, data_cfg.get("max_train_samples"), None
 	)
@@ -275,25 +407,41 @@ def main() -> None:
 	if not save_dir.is_absolute():
 		save_dir = PROJECT_ROOT / save_dir
 	save_dir.mkdir(parents=True, exist_ok=True)
+	class_weights_cache = None
+	if class_weights_cache_cfg:
+		class_weights_cache = Path(class_weights_cache_cfg)
+		if not class_weights_cache.is_absolute():
+			class_weights_cache = save_dir / class_weights_cache
 
 	train_ds = VSPWDataset(
-        root=data_root,
+		root=data_root,
 		split_dir=train_split,
 		num_classes=num_classes,
 		image_size=(height, width),
 		max_samples=max_train_samples,
 		seed=seed,
-        seq_len=8
+		seq_len=data_cfg.get("seq_len_train", 8)
 	)
 	valid_ds = VSPWDataset(
-        root=data_root,
+		root=data_root,
 		split_dir=valid_split,
 		num_classes=num_classes,
 		image_size=(height, width),
 		max_samples=max_valid_samples,
 		seed=seed,
-        seq_len=3
+		seq_len=data_cfg.get("seq_len_valid", 3)
 	)
+	# all_labels = set()
+
+	# for i in tqdm(range(len(train_ds))):
+	# 	mask = train_ds[i]["mask"]
+	# 	uniques = torch.unique(mask)
+	# 	all_labels.update(uniques.tolist())
+
+	# all_labels = sorted(all_labels)
+
+	# print("Total unique labels:", len(all_labels))
+	# print(all_labels)
 
 	train_loader = DataLoader(
 		train_ds,
@@ -313,18 +461,47 @@ def main() -> None:
 		prefetch_factor=4,
 		pin_memory=(device.type == "cuda"),
 	)
+	class_weights = _resolve_class_weights(
+		class_weights_cfg=class_weights_cfg,
+		dataset=train_ds,
+		num_classes=num_classes,
+		device=device,
+		ignore_index=255,
+		power=class_weight_power,
+		min_weight=class_weight_min,
+		max_weight=class_weight_max,
+		cache_path=class_weights_cache,
+	)
 
 	pretrained_backbone = bool(model_cfg.get("pretrained_backbone", True))
 	print(num_classes, pretrained_backbone)
-	
-	model = make_model(num_classes=num_classes, pretrained_backbone=pretrained_backbone).to(device)
-	
-	for name, p in model.named_parameters():
-		print(name, p.requires_grad)
 
+	model = make_model(num_classes=num_classes, pretrained_backbone=pretrained_backbone).to(device)
+
+	# for name, p in model.named_parameters():
+	# 	print(name, p.requires_grad)
+
+	head_params = list(model.classifier.parameters())
+	if model.aux_classifier is not None:
+		head_params += list(model.aux_classifier.parameters())
 	optimizer = torch.optim.AdamW(
-		model.parameters(), lr=lr, weight_decay=weight_decay
+		[
+			{"params": model.backbone.parameters(), "lr": backbone_lr, "name": "backbone"},
+			{"params": head_params, "lr": classifier_lr, "name": "classifier"},
+		],
+		weight_decay=weight_decay,
 	)
+	scheduler_t_max = epochs * len(train_loader)
+	if lr_scheduler_name == "cosine":
+		scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+			optimizer,
+			T_max=scheduler_t_max,
+			eta_min=min_lr,
+		)
+	elif lr_scheduler_name == "none":
+		scheduler = None
+	else:
+		raise ValueError(f"Unsupported lr_scheduler: {lr_scheduler_name}")
 	backbone_name = str(model_cfg.get("backbone", "resnet50"))
 
 	print(
@@ -333,6 +510,11 @@ def main() -> None:
 	)
 	print(f"Backbone: {backbone_name} | Model: DeepLabV3")
 	print(f"Using config: {args.config}")
+	print(
+		f"LR scheduler: {lr_scheduler_name} "
+		f"(backbone_lr={backbone_lr:.2e}, classifier_lr={classifier_lr:.2e}, "
+		f"min_lr={min_lr:.2e}, T_max_steps={scheduler_t_max})"
+	)
 
 	global scaler
 	scaler = torch.cuda.amp.GradScaler()
@@ -359,16 +541,28 @@ def main() -> None:
 		"training": {
 			"epochs": epochs,
 			"batch_size": batch_size,
-			"lr": lr,
+			"backbone_lr": backbone_lr,
+			"classifier_lr": classifier_lr,
+			"lr_scheduler": lr_scheduler_name,
+			"lr_scheduler_step": "batch",
+			"lr_scheduler_t_max_steps": scheduler_t_max,
+			"min_lr": min_lr,
 			"weight_decay": weight_decay,
 			"num_workers": num_workers,
 			"print_freq": print_freq,
+			"class_weights": class_weights_cfg,
+			"class_weight_power": class_weight_power,
+			"class_weight_min": class_weight_min,
+			"class_weight_max": class_weight_max,
+			"class_weights_cache": str(class_weights_cache) if class_weights_cache else None,
 			"device": str(device),
 		},
 		"output": {"save_dir": str(save_dir)},
 	}
 
 	for epoch in range(1, epochs + 1):
+		current_backbone_lr = optimizer.param_groups[0]["lr"]
+		current_classifier_lr = optimizer.param_groups[1]["lr"]
 		print(f"\nEpoch {epoch}/{epochs}")
 		model.train()
 		train_stats = train_one_epoch(
@@ -378,8 +572,13 @@ def main() -> None:
 			device=device,
 			aux_weight=aux_weight,
 			print_freq=max(1, print_freq),
+			class_weights=class_weights,
+			scheduler=scheduler,
 		)
 		val_stats = evaluate(model=model, loader=valid_loader, device=device, num_classes=num_classes)
+
+		next_backbone_lr = optimizer.param_groups[0]["lr"]
+		next_classifier_lr = optimizer.param_groups[1]["lr"]
 
 		row = {
 			"epoch": epoch,
@@ -388,6 +587,10 @@ def main() -> None:
 			"val_pixel_acc": val_stats["pixel_acc"],
 			"val_miou": val_stats["miou"],
 			"val_iou_valid_classes": val_stats.get("num_valid_iou_classes", 0),
+			"backbone_lr": current_backbone_lr,
+			"classifier_lr": current_classifier_lr,
+			"next_backbone_lr": next_backbone_lr,
+			"next_classifier_lr": next_classifier_lr,
 		}
 		history.append(row)
 
@@ -396,7 +599,9 @@ def main() -> None:
 			f"val_loss={row['val_loss']:.4f} "
 			f"val_pixel_acc={row['val_pixel_acc']:.4f} "
 			f"val_miou={row['val_miou']:.4f} "
-			f"val_iou_valid_classes={row['val_iou_valid_classes']}"
+			f"val_iou_valid_classes={row['val_iou_valid_classes']} "
+			f"backbone_lr={row['backbone_lr']:.2e}->{row['next_backbone_lr']:.2e} "
+			f"classifier_lr={row['classifier_lr']:.2e}->{row['next_classifier_lr']:.2e}"
 		)
 
 		log_path = save_dir / "train_log.txt"
@@ -406,7 +611,11 @@ def main() -> None:
 				f"train_loss={row['train_loss']:.6f} "
 				f"val_loss={row['val_loss']:.6f} "
 				f"val_pixel_acc={row['val_pixel_acc']:.6f} "
-				f"val_miou={row['val_miou']:.6f}\n"
+				f"val_miou={row['val_miou']:.6f} "
+				f"backbone_lr={row['backbone_lr']:.8e} "
+				f"classifier_lr={row['classifier_lr']:.8e} "
+				f"next_backbone_lr={row['next_backbone_lr']:.8e} "
+				f"next_classifier_lr={row['next_classifier_lr']:.8e}\n"
 			)
 
 		ckpt_last = save_dir / "deeplabv3_resnet50_last.pt"
@@ -415,6 +624,7 @@ def main() -> None:
 				"epoch": epoch,
 				"model_state": model.state_dict(),
 				"optimizer_state": optimizer.state_dict(),
+				"scheduler_state": scheduler.state_dict() if scheduler is not None else None,
 				"config": resolved_config,
 				"metrics": row,
 			},
@@ -429,6 +639,7 @@ def main() -> None:
 					"epoch": epoch,
 					"model_state": model.state_dict(),
 					"optimizer_state": optimizer.state_dict(),
+					"scheduler_state": scheduler.state_dict() if scheduler is not None else None,
 					"config": resolved_config,
 					"metrics": row,
 				},
