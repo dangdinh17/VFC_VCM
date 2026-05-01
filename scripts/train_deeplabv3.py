@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+from unittest import loader
 
 import numpy as np
 import torch
@@ -67,8 +68,8 @@ def evaluate(model, loader, device, num_classes: int, ignore_index: int = 255):
 	total_loss = 0.0
 	evaluator = EvaluatorTorch(num_classes)
 	evaluator.reset()
-
-	for batch in loader:
+	pbar = tqdm(loader)
+	for batch in pbar:    
 		images = batch['image'].to(device)
 		targets = batch['mask'].to(device)
 		logits = model(images)["out"]
@@ -78,6 +79,11 @@ def evaluate(model, loader, device, num_classes: int, ignore_index: int = 255):
 		evaluator.add_batch(targets.cpu(), preds.cpu(), ignore_index=ignore_index)
 
 	evaluator.beforeval()
+	gt_pixels_per_class = evaluator.confusion_matrix.sum(dim=1) 
+	# print("Classes xuất hiện:", (gt_pixels_per_class > 0).sum())
+	# for i, v in enumerate(gt_pixels_per_class):
+	# 	if v > 0:
+	# 		print(i, v.item())
 	inter = torch.diag(evaluator.confusion_matrix)
 	union = evaluator.confusion_matrix.sum(dim=1) + evaluator.confusion_matrix.sum(dim=0) - inter
 	per_class_iou = (inter / torch.clamp(union, min=1.0)).cpu().numpy()
@@ -277,6 +283,7 @@ def main() -> None:
 		image_size=(height, width),
 		max_samples=max_train_samples,
 		seed=seed,
+        seq_len=8
 	)
 	valid_ds = VSPWDataset(
         root=data_root,
@@ -285,6 +292,7 @@ def main() -> None:
 		image_size=(height, width),
 		max_samples=max_valid_samples,
 		seed=seed,
+        seq_len=3
 	)
 
 	train_loader = DataLoader(
