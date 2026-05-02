@@ -1,4 +1,4 @@
-experiment_name: roi_vfc_deeplabv3_vspw_codec_bitrate16
+experiment_name: roi_vfc_deeplabv3_vspw_codec_bitrate128
 seed: 42
 
 model:
@@ -37,7 +37,7 @@ data:
   valid_crop_type: center   # random | center
   pad_if_needed: true
   max_train_samples: null
-  max_valid_samples: 1000
+  max_valid_samples: null
   seq_len: 8
   num_classes: 125
 
@@ -103,7 +103,7 @@ training:
 
 loss_weights:
   codec:
-    lambda_r: 16.0
+    lambda_r: 128.0
     lambda_f: 16.0
     lambda_c: 1.6
     lambda_p: 4.0
@@ -125,5 +125,5 @@ logging:
     workspace: dangdinh17
 
 output:
-  save_dir: outputs/roi_vfc_deeplabv3_vspw_codec_bitrate16
+  save_dir: outputs/roi_vfc_deeplabv3_vspw_codec_bitrate128
   save_every_epoch: true
