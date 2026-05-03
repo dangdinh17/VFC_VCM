@@ -1,6 +1,7 @@
 from __future__ import annotations
 import warnings
-
+import os
+print("MAIN PID:", os.getpid())
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 from comet_ml import ExistingExperiment, Experiment
@@ -169,33 +170,10 @@ def compute_fst_loss(
 
 
 def _build_deeplab_feature_adapter(
-    pretrained: bool,
+    deeplab,
     device: torch.device,
-    num_classes: int = 2,
-    weights_path: Optional[Path] = None,
+
 ) -> DeepLabFeatureAdapter:
-    # Use backbone pretraining by default for the feature-input downstream model.
-    deeplab = deeplabv3_resnet50(
-        weights=None,
-        weights_backbone=ResNet50_Weights.IMAGENET1K_V2 if pretrained else None,
-        num_classes=num_classes,
-        aux_loss=True,
-    ).to(device)
-
-    if weights_path is not None:
-        ckpt_path = weights_path if weights_path.is_absolute() else PROJECT_ROOT / weights_path
-        if not ckpt_path.exists():
-            # pass
-            raise FileNotFoundError(f"DeepLab checkpoint not found: {ckpt_path}")
-
-        ckpt = torch.load(str(ckpt_path), map_location=device)
-        state_dict = ckpt.get("model_state", ckpt)
-        incompatible = deeplab.load_state_dict(state_dict, strict=False)
-        print(f"Loaded DeepLab weights from: {ckpt_path}")
-        if len(incompatible.missing_keys) > 0:
-            print(f"[warn] DeepLab missing keys: {len(incompatible.missing_keys)}")
-        if len(incompatible.unexpected_keys) > 0:
-            print(f"[warn] DeepLab unexpected keys: {len(incompatible.unexpected_keys)}")
 
     adapter = DeepLabFeatureAdapter(deeplab).to(device)
     _freeze_module(adapter)
@@ -366,6 +344,8 @@ def _build_dataloaders(cfg: Dict[str, Any], num_workers: int, train_bs: int, val
         batch_size=train_bs,
         shuffle=True,
         num_workers=num_workers,
+		persistent_workers=True,
+		prefetch_factor=4,
         pin_memory=torch.cuda.is_available(),
     )
     val_loader = DataLoader(
@@ -373,6 +353,8 @@ def _build_dataloaders(cfg: Dict[str, Any], num_workers: int, train_bs: int, val
         batch_size=val_bs,
         shuffle=False,
         num_workers=num_workers,
+		persistent_workers=True,
+		prefetch_factor=4,
         pin_memory=torch.cuda.is_available(),
     )
     return train_loader, val_loader
@@ -832,7 +814,8 @@ def main() -> None:
     output_cfg = cfg.get("output", {})
     logging_cfg = cfg.get("logging", {})
     data_cfg = cfg.setdefault("data", {})
-
+    deeplab_cfg = model_cfg.get("deeplabv3", {})
+    
     train_bs = int(_resolve_setting(args.train_batch_size, training_cfg.get("train_batch_size"), 8))
     val_bs = int(_resolve_setting(args.valid_batch_size, training_cfg.get("valid_batch_size"), 1))
     num_workers = int(training_cfg.get("num_workers", 4))
@@ -909,6 +892,34 @@ def main() -> None:
 
     train_loader, val_loader = _build_dataloaders(cfg, num_workers, train_bs, val_bs, seed)
 
+    deeplab_num_classes = int(deeplab_cfg.get("num_classes", num_classes))
+    deeplab = deeplabv3_resnet50(
+        weights=None,
+        weights_backbone=None,
+        num_classes=num_classes,
+        aux_loss=True,
+    ).to(device)
+
+    # load checkpoint nếu có
+    if deeplab_cfg.get("weights_path"):
+        ckpt = torch.load(deeplab_cfg.get("weights_path"), map_location=device)
+        state_dict = ckpt.get("model_state", ckpt)
+        incompatible = deeplab.load_state_dict(state_dict, strict=False)
+        print(f"Loaded DeepLab weights from: {deeplab_cfg.get('weights_path')}")
+        if len(incompatible.missing_keys) > 0:
+            print(f"[warn] DeepLab missing keys: {len(incompatible.missing_keys)}")
+        if len(incompatible.unexpected_keys) > 0:
+            print(f"[warn] DeepLab unexpected keys: {len(incompatible.unexpected_keys)}")
+
+    
+    deeplab_adapter = _build_deeplab_feature_adapter(
+        deeplab=deeplab,
+        device=device,
+    )
+    if bool(deeplab_cfg.get("freeze", True)):
+        _freeze_module(deeplab_adapter)
+        
+
     roi_cfg = model_cfg.get("roi_vfc", {})
     roi_vfc = ROI_VFC(
         img_channels=int(roi_cfg.get("img_channels", 3)),
@@ -923,13 +934,23 @@ def main() -> None:
     roi_vfc.feat_extraction = FeatureExtraction(
         backbone_name=str(feat_cfg.get("backbone", "resnet50")),
         pretrained=bool(feat_cfg.get("pretrained", True)),
+        # pretrained=False,  # We will load pretrained weights from the frozen DeepLab backbone
     ).to(device)
+    # print(type(deeplab.backbone))
+    # print(list(deeplab.backbone.named_children()))
+    # print(list(roi_vfc.feat_extraction.named_children()))
+    # roi_vfc.feat_extraction.body.load_state_dict(
+    #     deeplab.backbone.state_dict(),
+    #     strict=False
+    # )
+    # # print(deeplab)
+    # print(roi_vfc.feat_extraction)
     roi_vfc.perception_extraction = PerceptionExtraction(
         backbone_name=str(perc_cfg.get("backbone", "resnet50")),
         pretrained=bool(perc_cfg.get("pretrained", True)),
         remove_res1=bool(perc_cfg.get("remove_res1", True)),
     ).to(device)
-
+    
     if bool(feat_cfg.get("freeze", True)):
         _freeze_module(roi_vfc.feat_extraction)
     if bool(perc_cfg.get("freeze", True)):
@@ -941,17 +962,6 @@ def main() -> None:
         mid_channel=int(fst_cfg.get("mid_channel", 64)),
     ).to(device)
 
-    deeplab_cfg = model_cfg.get("deeplabv3", {})
-    deeplab_num_classes = int(deeplab_cfg.get("num_classes", num_classes))
-    deeplab_weights_path = deeplab_cfg.get("weights_path")
-    deeplab_adapter = _build_deeplab_feature_adapter(
-        pretrained=bool(deeplab_cfg.get("pretrained", True)),
-        device=device,
-        num_classes=deeplab_num_classes,
-        weights_path=Path(deeplab_weights_path) if deeplab_weights_path else None,
-    )
-    if bool(deeplab_cfg.get("freeze", True)):
-        _freeze_module(deeplab_adapter)
 
     aux_weight = float(deeplab_cfg.get("aux_weight", 0.4))
 
