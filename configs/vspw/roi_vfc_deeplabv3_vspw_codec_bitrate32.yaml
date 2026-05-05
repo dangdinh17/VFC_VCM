@@ -31,7 +31,7 @@ data:
   data_root: data/VSPW
   train_split: train
   valid_split: valid
-  image_size: [256, 256]
+  image_size: [128, 128]
   spatial_transform: crop   # crop | resize
   train_crop_type: random   # random | center
   valid_crop_type: center   # random | center

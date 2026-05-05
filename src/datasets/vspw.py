@@ -315,11 +315,15 @@ class VSPWSequenceDataset(Dataset):
                         frame_id = mask_path.stem
                         img_path = img_dir / f"{mask_path.stem}.jpg"
                         if not img_path.exists():
+                            # encountered a missing image for this sequence; skip
+                            seq_items = []
                             break
                         seq_items.append(
                             VSPWItem(img_path, mask_path, video_id, frame_id)
                         )
-                    items.append(seq_items)
+                    # only append fully-populated sequences of the requested length
+                    if len(seq_items) == self.seq_len:
+                        items.append(seq_items)
             if max_samples and len(items) >= max_samples:
                     return items
         return items

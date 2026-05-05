@@ -338,15 +338,41 @@ def _build_dataloaders(cfg: Dict[str, Any], num_workers: int, train_bs: int, val
         seed=seed,
         num_classes=int(data_cfg.get("num_classes", 124)),
     )
+    # for i in tqdm(range(len(train_ds))):
+    #     try:
+    #         train_ds[i]
+    #     except Exception as e:
+    #         print(f"Crash at {i}: {e}")
+    #         break
+    # Use a safe collate that avoids resizing non-resizable storages which can
+    # happen with the default collate in some worker setups (e.g. pinned or
+    # shared storages coming from numpy). This collate stacks tensors into new
+    # tensors explicitly and leaves non-tensor fields as lists.
+    def _safe_collate(batch):
+        if len(batch) == 0:
+            return {}
+        sample = batch[0]
+        out = {}
+        for k in sample.keys():
+            vals = [d[k] for d in batch]
+            if isinstance(vals[0], torch.Tensor):
+                # ensure all tensors are on CPU and contiguous before stacking
+                vals_cpu = [v.detach().cpu().contiguous() for v in vals]
+                out[k] = torch.stack(vals_cpu, dim=0)
+            else:
+                # keep strings, lists, etc. as lists
+                out[k] = vals
+        return out
 
     train_loader = DataLoader(
         train_ds,
         batch_size=train_bs,
         shuffle=True,
         num_workers=num_workers,
-		persistent_workers=True,
-		prefetch_factor=4,
+        persistent_workers=True,
+        prefetch_factor=4,
         pin_memory=torch.cuda.is_available(),
+        # collate_fn=_safe_collate,
     )
     val_loader = DataLoader(
         val_ds,
@@ -356,6 +382,7 @@ def _build_dataloaders(cfg: Dict[str, Any], num_workers: int, train_bs: int, val
 		persistent_workers=True,
 		prefetch_factor=4,
         pin_memory=torch.cuda.is_available(),
+        # collate_fn=_safe_collate,
     )
     return train_loader, val_loader
 
@@ -891,7 +918,7 @@ def main() -> None:
     save_dir.mkdir(parents=True, exist_ok=True)
 
     train_loader, val_loader = _build_dataloaders(cfg, num_workers, train_bs, val_bs, seed)
-
+    
     deeplab_num_classes = int(deeplab_cfg.get("num_classes", num_classes))
     deeplab = deeplabv3_resnet50(
         weights=None,
@@ -933,16 +960,16 @@ def main() -> None:
 
     roi_vfc.feat_extraction = FeatureExtraction(
         backbone_name=str(feat_cfg.get("backbone", "resnet50")),
-        pretrained=bool(feat_cfg.get("pretrained", True)),
-        # pretrained=False,  # We will load pretrained weights from the frozen DeepLab backbone
+        # pretrained=bool(feat_cfg.get("pretrained", True)),
+        pretrained=False,  # We will load pretrained weights from the frozen DeepLab backbone
     ).to(device)
     # print(type(deeplab.backbone))
     # print(list(deeplab.backbone.named_children()))
     # print(list(roi_vfc.feat_extraction.named_children()))
-    # roi_vfc.feat_extraction.body.load_state_dict(
-    #     deeplab.backbone.state_dict(),
-    #     strict=False
-    # )
+    roi_vfc.feat_extraction.body.load_state_dict(
+        deeplab.backbone.state_dict(),
+        strict=False
+    )
     # # print(deeplab)
     # print(roi_vfc.feat_extraction)
     roi_vfc.perception_extraction = PerceptionExtraction(
