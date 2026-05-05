@@ -37,7 +37,7 @@ data:
   valid_crop_type: center   # random | center
   pad_if_needed: true
   max_train_samples: null
-  max_valid_samples: null
+  max_valid_samples: 1000
   seq_len: 8
   num_classes: 125
 
